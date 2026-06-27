@@ -1,0 +1,6 @@
+services:
+  memoryv4-core:
+    build: .
+    image: memoryv4-core:dev
+    ports:
+      - "8000:8000"

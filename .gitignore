@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local/runtime state
+*.db
+*.sqlite
+*.sqlite3
+.env
+
+# Secrets and deploy keys
+.secrets/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
