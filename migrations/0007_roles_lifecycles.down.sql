@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS lifecycles;
+DROP TABLE IF EXISTS roles;
