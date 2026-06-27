@@ -2,5 +2,12 @@ services:
   memoryv4-core:
     build: .
     image: memoryv4-core:dev
+    environment:
+      MEMORYV4_DB_PATH: /data/memoryv4.sqlite3
     ports:
       - "8000:8000"
+    volumes:
+      - memoryv4-data:/data
+
+volumes:
+  memoryv4-data:
