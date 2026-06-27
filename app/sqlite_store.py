@@ -57,7 +57,8 @@ class SqliteStore:
         return _record_from_row(row)
 
     def update_record(self, record: MemoryRecord, *, actor: str) -> None:
-        self.get_record(record.id)
+        current = self.get_record(record.id)
+        validate_lifecycle_transition(current.lifecycle, record.lifecycle)
         with self.conn:
             self.conn.execute(
                 """

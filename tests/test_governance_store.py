@@ -1,3 +1,4 @@
+from dataclasses import replace
 import sqlite3
 
 import pytest
@@ -58,6 +59,31 @@ def test_lifecycle_transition_writes_audit_event() -> None:
         "record.create",
         "record.lifecycle_transition",
     ]
+
+
+@pytest.mark.parametrize("terminal_lifecycle", [Lifecycle.ARCHIVED, Lifecycle.EXPIRED])
+def test_update_record_rejects_terminal_lifecycle_to_live_regression(
+    terminal_lifecycle: Lifecycle,
+) -> None:
+    store = SqliteStore.in_memory()
+    record = MemoryRecord(
+        id=f"rec_{terminal_lifecycle.value}",
+        role=MemoryRole.CANONICAL,
+        lifecycle=terminal_lifecycle,
+        scope="tenant/project",
+        content="terminal memory",
+        author_actor="human",
+        write_policy="verified_only",
+    )
+    store.create_record(record, actor="human")
+
+    with pytest.raises(
+        ValueError,
+        match=f"Invalid lifecycle transition: {terminal_lifecycle.value} -> live",
+    ):
+        store.update_record(replace(record, lifecycle=Lifecycle.LIVE), actor="human")
+
+    assert store.get_record(record.id).lifecycle is terminal_lifecycle
 
 
 def test_supersession_sets_old_record_superseded_and_preserves_integrity() -> None:
