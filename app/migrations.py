@@ -27,6 +27,8 @@ CORE_MIGRATIONS: tuple[tuple[str, str], ...] = (
             content TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('canonical','active','evidence','exhaust')),
             lifecycle TEXT NOT NULL CHECK(lifecycle IN ('live','working','superseded','archived','expired')),
+            author_actor TEXT NOT NULL,
+            write_policy_json TEXT NOT NULL DEFAULT '{}',
             scope_path TEXT NOT NULL DEFAULT 'global',
             source_refs_json TEXT NOT NULL DEFAULT '[]',
             attrs_json TEXT NOT NULL DEFAULT '{}',
@@ -99,6 +101,13 @@ CORE_MIGRATIONS: tuple[tuple[str, str], ...] = (
         );
         """,
     ),
+    (
+        "0002_record_author_and_write_policy",
+        """
+        -- Columns are added by _ensure_governance_columns so this migration remains
+        -- idempotent for both fresh and already-bootstrapped SQLite databases.
+        """,
+    ),
 )
 
 
@@ -122,6 +131,7 @@ def run_migrations(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.executescript(sql)
         _ensure_legacy_columns(conn)
+        _ensure_governance_columns(conn)
         conn.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
         applied_now.append(version)
     return applied_now
@@ -134,3 +144,12 @@ def _ensure_legacy_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE records ADD COLUMN entity_id TEXT REFERENCES entities(id)")
     if "attrs_json" not in columns:
         conn.execute("ALTER TABLE records ADD COLUMN attrs_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _ensure_governance_columns(conn: sqlite3.Connection) -> None:
+    """Add governed-record actor/policy fields to already-bootstrapped DBs."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()}
+    if "author_actor" not in columns:
+        conn.execute("ALTER TABLE records ADD COLUMN author_actor TEXT NOT NULL DEFAULT 'unknown:migrated'")
+    if "write_policy_json" not in columns:
+        conn.execute("ALTER TABLE records ADD COLUMN write_policy_json TEXT NOT NULL DEFAULT '{}'")

@@ -21,6 +21,8 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
             role=Role.CANONICAL,
             lifecycle=Lifecycle.LIVE,
             scope_path="org:acme/project:psi",
+            author_actor="human:operator",
+            write_policy={"promote_requires": ["promote"], "supersede_requires": ["supersede"]},
             source_refs=["plan:section-3"],
         ),
         actor="test-agent",
@@ -46,6 +48,8 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
             role=Role.CANONICAL,
             lifecycle=Lifecycle.LIVE,
             scope_path="org:acme/project:psi",
+            author_actor="human:operator",
+            write_policy={"promote_requires": ["promote"], "supersede_requires": ["supersede"]},
             source_refs=["plan:section-3"],
         ),
         actor="reviewer",
@@ -59,6 +63,10 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
 
     with sqlite3.connect(tmp_path / "memoryv4.sqlite3") as conn:
         actions = [row[0] for row in conn.execute("SELECT action FROM audit_events ORDER BY id")]
+        persisted_governance = conn.execute(
+            "SELECT author_actor, write_policy_json FROM records WHERE id = ?", ("rec_replacement",)
+        ).fetchone()
+        record_columns = {row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()}
         migrated_tables = {
             row[0]
             for row in conn.execute(
@@ -68,6 +76,11 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
         migrations = [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
 
     assert actions == ["create_record", "transition", "create_record", "supersede"]
+    assert persisted_governance == (
+        "human:operator",
+        '{"promote_requires": ["promote"], "supersede_requires": ["supersede"]}',
+    )
+    assert {"author_actor", "write_policy_json"}.issubset(record_columns)
     assert {
         "schema_migrations",
         "entities",
@@ -78,7 +91,7 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
         "retrieval_events",
         "health_findings",
     }.issubset(migrated_tables)
-    assert migrations == ["0001_core_governed_objects"]
+    assert migrations == ["0001_core_governed_objects", "0002_record_author_and_write_policy"]
 
 
 def test_sqlite_store_writes_health_findings_without_canonical_mutation(tmp_path: Path) -> None:

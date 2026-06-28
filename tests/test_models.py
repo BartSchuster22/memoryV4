@@ -24,10 +24,14 @@ def test_governed_object_models_accept_only_canonical_roles_and_lifecycles() -> 
         content="SQLite-only in P1.",
         role="canonical",
         lifecycle="live",
+        author_actor="human:operator",
+        write_policy={"promote_requires": ["promote"], "supersede_requires": ["supersede"]},
     )
 
     assert record.role is Role.CANONICAL
     assert record.lifecycle is Lifecycle.LIVE
+    assert record.author_actor == "human:operator"
+    assert record.write_policy == {"promote_requires": ["promote"], "supersede_requires": ["supersede"]}
 
     with pytest.raises(ValueError, match="invalid role"):
         Record(
@@ -38,6 +42,8 @@ def test_governed_object_models_accept_only_canonical_roles_and_lifecycles() -> 
             content="Invalid role must not pass validation.",
             role="draft",
             lifecycle="live",
+            author_actor="human:operator",
+            write_policy={},
         )
 
     with pytest.raises(ValueError, match="invalid lifecycle"):
@@ -49,6 +55,21 @@ def test_governed_object_models_accept_only_canonical_roles_and_lifecycles() -> 
             content="Invalid lifecycle must not pass validation.",
             role="active",
             lifecycle="deleted",
+            author_actor="human:operator",
+            write_policy={},
+        )
+
+    with pytest.raises(ValueError, match="author_actor must not be empty"):
+        Record(
+            id="rec_missing_actor",
+            entity_type="decision",
+            title="Missing actor",
+            topic="storage",
+            content="Governed records must name the proposing or writing actor.",
+            role="active",
+            lifecycle="working",
+            author_actor="",
+            write_policy={},
         )
 
 

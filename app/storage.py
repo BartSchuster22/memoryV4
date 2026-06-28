@@ -38,7 +38,8 @@ class SqliteStore:
             row = conn.execute(
                 """
                 SELECT id, entity_id, entity_type, title, topic, content, role, lifecycle,
-                       scope_path, source_refs_json, attrs_json, superseded_by
+                       author_actor, write_policy_json, scope_path, source_refs_json,
+                       attrs_json, superseded_by
                 FROM records
                 WHERE id = ?
                 """,
@@ -143,12 +144,14 @@ class SqliteStore:
             """
             INSERT INTO records(
                 id, entity_id, entity_type, title, topic, content, role, lifecycle,
-                scope_path, source_refs_json, attrs_json, superseded_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                author_actor, write_policy_json, scope_path, source_refs_json,
+                attrs_json, superseded_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id, rec.entity_id, rec.entity_type, rec.title, rec.topic, rec.content,
-                rec.role.value, rec.lifecycle.value, rec.scope_path,
+                rec.role.value, rec.lifecycle.value, rec.author_actor,
+                json.dumps(rec.write_policy, sort_keys=True), rec.scope_path,
                 json.dumps(rec.source_refs, sort_keys=True), json.dumps(rec.attrs, sort_keys=True),
                 rec.superseded_by, now, now,
             ),
@@ -193,6 +196,7 @@ def _record_from_row(row: sqlite3.Row) -> Record:
     return Record(
         id=row["id"], entity_id=row["entity_id"], entity_type=row["entity_type"], title=row["title"], topic=row["topic"],
         content=row["content"], role=Role(row["role"]), lifecycle=Lifecycle(row["lifecycle"]),
+        author_actor=row["author_actor"], write_policy=json.loads(row["write_policy_json"]),
         scope_path=row["scope_path"], source_refs=json.loads(row["source_refs_json"]),
         attrs=json.loads(row["attrs_json"]), superseded_by=row["superseded_by"],
     )

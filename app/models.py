@@ -45,6 +45,8 @@ class Record:
     content: str
     role: Role | str
     lifecycle: Lifecycle | str
+    author_actor: str
+    write_policy: dict[str, Any]
     scope_path: str = "global"
     entity_id: str | None = None
     source_refs: list[str] = field(default_factory=list)
@@ -57,6 +59,7 @@ class Record:
         _require_non_empty("title", self.title)
         _require_non_empty("topic", self.topic)
         _require_non_empty("scope_path", self.scope_path)
+        _require_non_empty("author_actor", self.author_actor)
         object.__setattr__(self, "role", _coerce_role(self.role))
         object.__setattr__(self, "lifecycle", _coerce_lifecycle(self.lifecycle))
 
