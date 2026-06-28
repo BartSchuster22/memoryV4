@@ -39,7 +39,7 @@ X-MemoryV4-Scope: org:acme/project:psi/agent:alice/user:u123
 
 The service rejects the request unless the requested scope is equal to or below the API key's `allowed_scope_path`.
 
-Retrieval returns only records whose `scope_path` is ancestor-or-equal to the requested scope, plus curated `public` records only if tenant policy explicitly enables public reads.
+Retrieval returns only records in the requested scope prefix subtree, plus curated `public` records only if tenant policy explicitly enables public reads.
 
 Examples:
 
@@ -231,9 +231,9 @@ Response body:
 Rules:
 
 - Lexical and vector lanes apply identical scope filters.
-- Fusion happens before final limit.
+- Fusion happens before final limit using reciprocal-rank fusion with `k=60`.
 - Governance prior is bounded and cannot hide strongly relevant evidence.
-- If vector search is unavailable or times out, the response may degrade to lexical-only and must log that state.
+- If vector search is unavailable or times out, the response may degrade to lexical-only and must report that state.
 
 ## Worker endpoints
 

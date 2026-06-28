@@ -7,8 +7,9 @@ P1.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
+from app.embeddings import EmbeddingProvider
 from app.models import AuditEvent, Filter, Lifecycle, Record
 
 
@@ -23,7 +24,9 @@ class Store(Protocol):
 
     def lexical_rank(self, query: str, f: Filter, k: int) -> list[str]: ...
 
-    def vector_rank(self, qvec: bytes, f: Filter, k: int) -> list[str]: ...
+    def vector_rank(self, qvec: Sequence[float], f: Filter, k: int) -> list[str]: ...
+
+    def backfill_embeddings(self, provider: EmbeddingProvider, f: Filter | None = None) -> int: ...
 
     def write_audit(self, ev: AuditEvent) -> None: ...
 

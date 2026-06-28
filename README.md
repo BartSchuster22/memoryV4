@@ -1,6 +1,6 @@
 # MemoryV4 Core
 
-MemoryV4 is a slim, single-container FastAPI memory core. This P0-P2 scaffold intentionally includes only the core service baseline, SQLite `Store` adapter seam, additive schema migrations, health endpoint, docs skeleton, tests, and local build commands.
+MemoryV4 is a slim, single-container FastAPI memory core. This P0-P4 scaffold includes the core service baseline, SQLite `Store` adapter seam, additive schema migrations, health endpoint, embedding provider seam, BM25/vector hybrid retrieval, docs, tests, and local build commands.
 
 Hard boundaries for this repository:
 
@@ -36,3 +36,13 @@ Expected health response:
 ## Runtime
 
 The container stores its SQLite file at `/data/memoryv4.sqlite3` by default. Override with `MEMORYV4_DB_PATH` for tests or local runs. SQLite migrations are applied on Store startup and recorded in `schema_migrations`; P2 applies baseline `0001`/`0002` plus additive migrations `0006_record_embeddings` through `0012_health_findings`.
+
+## P3-P4 retrieval
+
+Retrieval is split between the SQLite adapter and core fusion logic:
+
+- `app.embeddings.EmbeddingProvider` is the provider seam. `DeterministicHashEmbeddingProvider` is a deterministic local fallback for tests/disconnected installs; production model adapters can implement the same `embed(text) -> Sequence[float]` contract.
+- `SqliteStore.backfill_embeddings(provider, filter)` embeds matching records missing `record_embeddings` rows and stores packed float vectors with dimensions/model metadata.
+- `SqliteStore.lexical_rank()` is a BM25 lane over title/topic/content, and `SqliteStore.vector_rank()` is a cosine-similarity lane over persisted vectors.
+- `HybridRetriever.search()` combines lanes with reciprocal-rank fusion using `k=60`, then applies a small bounded governance prior for live governed records.
+- Both lanes enforce the same scope-prefix isolation (`scope = prefix` or `scope` below `prefix/`); sibling scopes are excluded. If the provider is unavailable, search degrades to lexical-only results.

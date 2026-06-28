@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import struct
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+from app.embeddings import EmbeddingProvider, EmbeddingUnavailable
 from app.migrations import run_migrations
 from app.models import AuditEvent, Filter, Lifecycle, Record, Role
 
@@ -83,7 +87,7 @@ class SqliteStore:
         return record
 
     def lexical_rank(self, query: str, f: Filter, k: int) -> list[str]:
-        terms = [term.casefold() for term in query.split() if term.strip()]
+        terms = _tokenize(query)
         if not terms or k <= 0:
             return []
         clauses, params = _filter_sql(f)
@@ -91,20 +95,61 @@ class SqliteStore:
             SELECT id, title, topic, content
             FROM records
             WHERE """ + " AND ".join(clauses) + " ORDER BY updated_at DESC, id ASC"
-        ranked: list[tuple[int, str]] = []
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        docs = [(row["id"], _tokenize(" ".join([row["title"], row["topic"], row["content"]]))) for row in rows]
+        ranked = _bm25_rank(terms, docs)
+        return [rid for rid, _ in ranked[:k]]
+
+    def vector_rank(self, qvec: Sequence[float], f: Filter, k: int) -> list[str]:
+        if not qvec or k <= 0:
+            return []
+        clauses, params = _filter_sql(f)
+        sql = """
+            SELECT records.id, record_embeddings.embedding
+            FROM records
+            JOIN record_embeddings ON record_embeddings.record_id = records.id
+            WHERE """ + " AND ".join(clauses)
+        ranked: list[tuple[float, str]] = []
         with self._connect() as conn:
             for row in conn.execute(sql, params).fetchall():
-                haystack = " ".join([row["title"], row["topic"], row["content"]]).casefold()
-                score = sum(1 for term in terms if term in haystack)
-                if score:
+                score = _cosine_similarity(qvec, _unpack_vector(row["embedding"]))
+                if score > 0.0:
                     ranked.append((score, row["id"]))
         ranked.sort(key=lambda item: (-item[0], item[1]))
         return [rid for _, rid in ranked[:k]]
 
-    def vector_rank(self, qvec: bytes, f: Filter, k: int) -> list[str]:
-        # P1 reserves the vector lane behind the Store port but does not build an
-        # embeddings backend. Returning no candidates preserves baseline behavior.
-        return []
+    def backfill_embeddings(self, provider: EmbeddingProvider, f: Filter | None = None) -> int:
+        """Embed records matching the optional filter that do not yet have a vector row."""
+        filter_clauses, filter_params = _filter_sql(f or Filter())
+        sql = """
+            SELECT records.id, records.title, records.topic, records.content
+            FROM records
+            LEFT JOIN record_embeddings ON record_embeddings.record_id = records.id
+            WHERE record_embeddings.record_id IS NULL AND """ + " AND ".join(filter_clauses) + " ORDER BY records.id"
+        with self._connect() as conn:
+            rows = conn.execute(sql, filter_params).fetchall()
+            written = 0
+            for row in rows:
+                text = _record_embedding_text(row["title"], row["topic"], row["content"])
+                try:
+                    vector = provider.embed(text)
+                except EmbeddingUnavailable:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO record_embeddings(record_id, embedding, dimensions, model, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        dimensions = excluded.dimensions,
+                        model = excluded.model,
+                        updated_at = excluded.updated_at
+                    """,
+                    (row["id"], _pack_vector(vector), len(vector), provider.model, _now()),
+                )
+                written += 1
+        return written
 
     def write_audit(self, ev: AuditEvent) -> None:
         with self._connect() as conn:
@@ -187,9 +232,83 @@ def _filter_sql(f: Filter) -> tuple[list[str], list[str]]:
         clauses.append("topic = ?")
         params.append(f.topic)
     if f.scope_prefixes:
-        clauses.append("scope_path IN (" + ", ".join("?" for _ in f.scope_prefixes) + ")")
-        params.extend(f.scope_prefixes)
+        scope_clauses: list[str] = []
+        for scope in f.scope_prefixes:
+            scope_clauses.append("(scope_path = ? OR scope_path LIKE ?)")
+            params.extend([scope, f"{scope}/%"])
+        clauses.append("(" + " OR ".join(scope_clauses) + ")")
     return clauses, params
+
+
+def _record_embedding_text(title: str, topic: str, content: str) -> str:
+    return f"{title}\n{topic}\n{content}"
+
+
+def _tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in text.casefold():
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _bm25_rank(query_terms: list[str], docs: list[tuple[str, list[str]]]) -> list[tuple[str, float]]:
+    if not docs:
+        return []
+    avgdl = sum(len(tokens) for _, tokens in docs) / len(docs)
+    avgdl = avgdl or 1.0
+    document_frequency = Counter({term: 0 for term in set(query_terms)})
+    for _, tokens in docs:
+        token_set = set(tokens)
+        for term in document_frequency:
+            if term in token_set:
+                document_frequency[term] += 1
+    k1 = 1.5
+    b = 0.75
+    ranked: list[tuple[str, float]] = []
+    for record_id, tokens in docs:
+        counts = Counter(tokens)
+        length = len(tokens) or 1
+        score = 0.0
+        for term in query_terms:
+            tf = counts.get(term, 0)
+            if tf == 0:
+                continue
+            df = document_frequency.get(term, 0)
+            idf = math.log(1.0 + (len(docs) - df + 0.5) / (df + 0.5))
+            denom = tf + k1 * (1.0 - b + b * length / avgdl)
+            score += idf * (tf * (k1 + 1.0)) / denom
+        if score > 0.0:
+            ranked.append((record_id, score))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked
+
+
+def _pack_vector(vector: Sequence[float]) -> bytes:
+    return struct.pack(f"!{len(vector)}d", *vector)
+
+
+def _unpack_vector(blob: bytes) -> list[float]:
+    if len(blob) % 8 != 0:
+        return []
+    return list(struct.unpack(f"!{len(blob) // 8}d", blob))
+
+
+def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 def _record_from_row(row: sqlite3.Row) -> Record:

@@ -112,6 +112,7 @@ Initial Store responsibilities:
 - `supersede(old_id, new_record, actor)`
 - `lexical_rank(query, filter, k)` returning ranked record ids
 - `vector_rank(query_vector, filter, k)` returning ranked record ids when enabled
+- `backfill_embeddings(provider, filter=None)` for provider-driven embedding backfill
 - `write_audit(event)`
 - `write_finding(finding)`
 - backup/restore helpers owned by the SQLite adapter or operations layer
@@ -131,12 +132,13 @@ SQLite is the only backend implemented in this phase.
 
 Target retrieval uses:
 
-1. Lexical lane: SQLite FTS with BM25 ranking.
-2. Vector lane: optional SQLite vector table after embeddings are introduced.
-3. Fusion: reciprocal-rank fusion in core.
-4. Governance prior: bounded multiplier that nudges `canonical/live` without hiding highly relevant evidence.
-5. Scope filter: identical ancestor-or-equal scope enforcement in every lane.
-6. Audit: retrieval event logged with degraded/fallback state where applicable.
+1. Lexical lane: SQLite adapter BM25 ranking over governed record text.
+2. Vector lane: persisted `record_embeddings` rows populated through the provider abstraction.
+3. Fusion: reciprocal-rank fusion in core with `k=60`.
+4. Governance prior: bounded additive nudge for live governed records; it must not swamp lane relevance.
+5. Scope filter: identical prefix-isolated scope enforcement in every lane (`scope = prefix` or `scope` below `prefix/`).
+6. Fallback: if embeddings are unavailable, retrieval returns lexical results instead of failing closed.
+7. Audit: retrieval event logged with degraded/fallback state where applicable.
 
 Candidate gathering must happen before final limiting. This avoids the known bug where newest rows are limited before governance or relevance sorting.
 
@@ -154,10 +156,10 @@ org:<org>/project:<project>/agent:<agent>/user:<user>/session:<session>
 public
 ```
 
-Retrieval at a requested scope may return only:
+Retrieval for a requested scope prefix may return only:
 
-- records at ancestor-or-equal scopes; and
-- curated `public` records only when explicitly allowed by tenant policy.
+- records exactly at that prefix; and
+- records below that prefix subtree.
 
 It must never return sibling tenant/project/agent/user/session records. The API auth layer must bind keys to an allowed scope subtree and reject requests outside that grant.
 
