@@ -32,6 +32,123 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _seed_450cdba_p1_schema(conn: sqlite3.Connection) -> None:
+    """Seed the trusted 450cdba P1 schema where scope/health existed in 0001."""
+    conn.executescript(
+        """
+        CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO schema_migrations(version) VALUES
+            ('0001_core_governed_objects'),
+            ('0002_record_author_and_write_policy');
+
+        CREATE TABLE entities (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            scope_path TEXT NOT NULL DEFAULT 'global',
+            attrs_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_entities_scope ON entities(scope_path);
+
+        CREATE TABLE records (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT REFERENCES entities(id),
+            entity_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            content TEXT NOT NULL,
+            role TEXT NOT NULL,
+            lifecycle TEXT NOT NULL,
+            author_actor TEXT NOT NULL,
+            write_policy_json TEXT NOT NULL DEFAULT '{}',
+            scope_path TEXT NOT NULL DEFAULT 'global',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            attrs_json TEXT NOT NULL DEFAULT '{}',
+            superseded_by TEXT REFERENCES records(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_records_topic ON records(topic);
+        CREATE INDEX idx_records_scope ON records(scope_path);
+        CREATE INDEX idx_records_governance ON records(role, lifecycle);
+
+        CREATE TABLE relations (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            role TEXT NOT NULL,
+            lifecycle TEXT NOT NULL,
+            scope_path TEXT NOT NULL DEFAULT 'global',
+            attrs_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_relations_source ON relations(source_id);
+        CREATE INDEX idx_relations_target ON relations(target_id);
+        CREATE INDEX idx_relations_scope ON relations(scope_path);
+
+        CREATE TABLE artifacts (
+            id TEXT PRIMARY KEY,
+            artifact_type TEXT NOT NULL,
+            uri TEXT NOT NULL,
+            media_type TEXT,
+            role TEXT NOT NULL,
+            lifecycle TEXT NOT NULL,
+            scope_path TEXT NOT NULL DEFAULT 'global',
+            attrs_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_artifacts_scope ON artifacts(scope_path);
+
+        CREATE TABLE audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            record_id TEXT,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE retrieval_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            scope_path TEXT NOT NULL DEFAULT 'global',
+            record_ids_json TEXT NOT NULL DEFAULT '[]',
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_retrieval_events_scope ON retrieval_events(scope_path);
+
+        CREATE TABLE health_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            refs_json TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(kind, refs_json)
+        );
+
+        INSERT INTO entities(id, entity_type, name, created_at, updated_at)
+        VALUES ('ent_1', 'decision', 'Storage', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        INSERT INTO records(
+            id, entity_id, entity_type, title, topic, content, role, lifecycle,
+            author_actor, write_policy_json, scope_path, source_refs_json, attrs_json, created_at, updated_at
+        ) VALUES (
+            'rec_1', 'ent_1', 'decision', 'Storage', 'storage', 'SQLite only', 'canonical', 'live',
+            'human:operator', '{}', 'tenant/p1', '[]', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+        );
+        INSERT INTO health_findings(kind, refs_json, detail_json)
+        VALUES ('orphan', '["p1"]', '{"baseline":"450cdba"}');
+        """
+    )
+
+
 def test_p2_migration_versions_are_additive_and_ordered() -> None:
     versions = [migration.version for migration in CORE_MIGRATIONS]
 
@@ -85,6 +202,8 @@ def test_p2_fresh_database_rerun_noop_and_down_paths(tmp_path: Path) -> None:
             "scope_policies",
             "health_findings",
         }.intersection(_tables(conn))
+        assert "scope_path" not in _columns(conn, "records")
+        assert "idx_records_scope" not in _indexes(conn)
 
 
 def test_p2_upgrade_fixture_from_p1_baseline_preserves_rows_and_applies_scope_defaults(tmp_path: Path) -> None:
@@ -140,6 +259,37 @@ def test_p2_upgrade_fixture_from_p1_baseline_preserves_rows_and_applies_scope_de
         assert conn.execute("SELECT scope_path FROM records WHERE id='rec_1'").fetchone()[0] == "global"
         assert conn.execute("SELECT scope_path FROM entities WHERE id='ent_1'").fetchone()[0] == "global"
         assert conn.execute("SELECT COUNT(*) FROM promotion_log").fetchone()[0] == 0
+
+
+def test_p2_rollback_preserves_450cdba_p1_scope_and_health_objects(tmp_path: Path) -> None:
+    db_path = tmp_path / "upgrade-450cdba.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        _seed_450cdba_p1_schema(conn)
+
+        applied = run_migrations(conn)
+
+        assert applied == P2_VERSIONS
+        assert conn.execute("SELECT scope_path FROM records WHERE id='rec_1'").fetchone()[0] == "tenant/p1"
+        assert conn.execute("SELECT COUNT(*) FROM health_findings").fetchone()[0] == 1
+
+        rollback_migration(conn, "0012_health_findings")
+        rollback_migration(conn, "0011_scope_paths")
+
+        assert "health_findings" in _tables(conn)
+        assert conn.execute("SELECT detail_json FROM health_findings WHERE kind='orphan'").fetchone()[0] == '{"baseline":"450cdba"}'
+        assert "scope_path" in _columns(conn, "records")
+        assert "scope_path" in _columns(conn, "entities")
+        assert "scope_path" in _columns(conn, "relations")
+        assert "scope_path" in _columns(conn, "artifacts")
+        assert "scope_path" in _columns(conn, "retrieval_events")
+        assert {
+            "idx_records_scope",
+            "idx_entities_scope",
+            "idx_relations_scope",
+            "idx_artifacts_scope",
+            "idx_retrieval_events_scope",
+        }.issubset(_indexes(conn))
+        assert conn.execute("SELECT scope_path FROM records WHERE id='rec_1'").fetchone()[0] == "tenant/p1"
 
 
 def test_sqlite_store_initializes_with_p2_schema_and_idempotent_findings(tmp_path: Path) -> None:

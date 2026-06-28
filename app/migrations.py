@@ -261,6 +261,7 @@ def run_migrations(conn: sqlite3.Connection) -> list[str]:
         )
         """
     )
+    _ensure_migration_object_table(conn)
     applied = {
         row[0]
         for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
@@ -280,13 +281,16 @@ def rollback_migration(conn: sqlite3.Connection, version: str) -> None:
     migration = _migration_by_version(version)
     if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone() is None:
         return
+    _ensure_migration_object_table(conn)
     if version == "0011_scope_paths":
-        conn.executescript(migration.down_sql)
-        for table in ("records", "entities", "relations", "artifacts", "retrieval_events"):
-            _drop_column_if_exists(conn, table, "scope_path")
+        _rollback_scope_path_objects(conn, version)
+    elif version == "0012_health_findings":
+        if _migration_introduced_object(conn, version, "table", "health_findings", "health_findings"):
+            conn.executescript(migration.down_sql)
     else:
         conn.executescript(migration.down_sql)
     conn.execute("DELETE FROM schema_migrations WHERE version = ?", (version,))
+    conn.execute("DELETE FROM schema_migration_objects WHERE version = ?", (version,))
 
 
 def _migration_by_version(version: str) -> Migration:
@@ -297,11 +301,15 @@ def _migration_by_version(version: str) -> Migration:
 
 
 def _apply_migration(conn: sqlite3.Connection, migration: Migration) -> None:
+    introduced_objects: list[tuple[str, str, str]] = []
+    if migration.version == "0012_health_findings" and not _table_exists(conn, "health_findings"):
+        introduced_objects.append(("table", "health_findings", "health_findings"))
     conn.executescript(migration.up_sql)
     _ensure_legacy_columns(conn)
     _ensure_governance_columns(conn)
     if migration.version == "0011_scope_paths":
-        _ensure_scope_columns(conn)
+        introduced_objects.extend(_ensure_scope_columns(conn))
+    _record_migration_objects(conn, migration.version, introduced_objects)
 
 
 def _ensure_legacy_columns(conn: sqlite3.Connection) -> None:
@@ -324,21 +332,97 @@ def _ensure_governance_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE records ADD COLUMN write_policy_json TEXT NOT NULL DEFAULT '{}'")
 
 
-def _ensure_scope_columns(conn: sqlite3.Connection) -> None:
+def _ensure_scope_columns(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    introduced_objects: list[tuple[str, str, str]] = []
     scoped_tables = ("records", "entities", "relations", "artifacts", "retrieval_events")
     for table in scoped_tables:
         if _table_exists(conn, table) and not _column_exists(conn, table, "scope_path"):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN scope_path TEXT NOT NULL DEFAULT 'global'")
-    if _table_exists(conn, "records"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_records_scope ON records(scope_path)")
-    if _table_exists(conn, "entities"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_scope ON entities(scope_path)")
-    if _table_exists(conn, "relations"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_relations_scope ON relations(scope_path)")
-    if _table_exists(conn, "artifacts"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_scope ON artifacts(scope_path)")
-    if _table_exists(conn, "retrieval_events"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_retrieval_events_scope ON retrieval_events(scope_path)")
+            introduced_objects.append(("column", table, "scope_path"))
+    scope_indexes = {
+        "records": "idx_records_scope",
+        "entities": "idx_entities_scope",
+        "relations": "idx_relations_scope",
+        "artifacts": "idx_artifacts_scope",
+        "retrieval_events": "idx_retrieval_events_scope",
+    }
+    for table, index_name in scope_indexes.items():
+        if _table_exists(conn, table):
+            index_existed = _index_exists(conn, index_name)
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}(scope_path)")
+            if not index_existed:
+                introduced_objects.append(("index", table, index_name))
+    return introduced_objects
+
+
+def _ensure_migration_object_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migration_objects (
+            version TEXT NOT NULL,
+            object_type TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            object_name TEXT NOT NULL,
+            PRIMARY KEY (version, object_type, table_name, object_name)
+        )
+        """
+    )
+
+
+def _record_migration_objects(
+    conn: sqlite3.Connection,
+    version: str,
+    objects: list[tuple[str, str, str]],
+) -> None:
+    if not objects:
+        return
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO schema_migration_objects(version, object_type, table_name, object_name)
+        VALUES (?, ?, ?, ?)
+        """,
+        [(version, object_type, table_name, object_name) for object_type, table_name, object_name in objects],
+    )
+
+
+def _migration_introduced_object(
+    conn: sqlite3.Connection,
+    version: str,
+    object_type: str,
+    table_name: str,
+    object_name: str,
+) -> bool:
+    return (
+        conn.execute(
+            """
+            SELECT 1 FROM schema_migration_objects
+            WHERE version = ? AND object_type = ? AND table_name = ? AND object_name = ?
+            """,
+            (version, object_type, table_name, object_name),
+        ).fetchone()
+        is not None
+    )
+
+
+def _rollback_scope_path_objects(conn: sqlite3.Connection, version: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT object_type, table_name, object_name
+        FROM schema_migration_objects
+        WHERE version = ?
+        ORDER BY CASE object_type WHEN 'index' THEN 0 WHEN 'column' THEN 1 ELSE 2 END
+        """,
+        (version,),
+    ).fetchall()
+    for object_type, table_name, object_name in rows:
+        if object_type == "index":
+            conn.execute(f"DROP INDEX IF EXISTS {object_name}")
+        elif object_type == "column":
+            _drop_column_if_exists(conn, table_name, object_name)
+
+
+def _index_exists(conn: sqlite3.Connection, index: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (index,)).fetchone() is not None
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
