@@ -83,8 +83,8 @@ class RetrievalService:
         self.provider = provider
         self.hybrid = HybridRetriever(store, provider)
 
-    def backfill_embeddings(self) -> int:
-        return self.store.backfill_embeddings(self.provider)
+    def backfill_embeddings(self, f: Filter | None = None) -> int:
+        return self.store.backfill_embeddings(self.provider, f)
 
     def search(self, query: str, f: Filter, limit: int) -> RetrievalResponse:
         results = self.hybrid.search(query, f, limit)
