@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.migrations import run_migrations
 from app.models import AuditEvent, Filter, Lifecycle, Record, Role
 
 
@@ -36,8 +37,8 @@ class SqliteStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, entity_type, title, topic, content, role, lifecycle,
-                       scope_path, source_refs_json, superseded_by
+                SELECT id, entity_id, entity_type, title, topic, content, role, lifecycle,
+                       scope_path, source_refs_json, attrs_json, superseded_by
                 FROM records
                 WHERE id = ?
                 """,
@@ -129,43 +130,7 @@ class SqliteStore:
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS records (
-                    id TEXT PRIMARY KEY,
-                    entity_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    topic TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('canonical','active','evidence','exhaust')),
-                    lifecycle TEXT NOT NULL CHECK(lifecycle IN ('live','working','superseded','archived','expired')),
-                    scope_path TEXT NOT NULL DEFAULT 'global',
-                    source_refs_json TEXT NOT NULL DEFAULT '[]',
-                    superseded_by TEXT REFERENCES records(id),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_records_topic ON records(topic);
-                CREATE INDEX IF NOT EXISTS idx_records_scope ON records(scope_path);
-                CREATE TABLE IF NOT EXISTS audit_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    record_id TEXT,
-                    detail_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS health_findings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL CHECK(kind IN ('contradiction','compaction','decay','orphan')),
-                    refs_json TEXT NOT NULL,
-                    detail_json TEXT NOT NULL DEFAULT '{}',
-                    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','dismissed')),
-                    created_at TEXT NOT NULL,
-                    UNIQUE(kind, refs_json)
-                );
-                """
-            )
+            run_migrations(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.database_path)
@@ -177,14 +142,15 @@ class SqliteStore:
         conn.execute(
             """
             INSERT INTO records(
-                id, entity_type, title, topic, content, role, lifecycle,
-                scope_path, source_refs_json, superseded_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, entity_id, entity_type, title, topic, content, role, lifecycle,
+                scope_path, source_refs_json, attrs_json, superseded_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                rec.id, rec.entity_type, rec.title, rec.topic, rec.content,
+                rec.id, rec.entity_id, rec.entity_type, rec.title, rec.topic, rec.content,
                 rec.role.value, rec.lifecycle.value, rec.scope_path,
-                json.dumps(rec.source_refs, sort_keys=True), rec.superseded_by, now, now,
+                json.dumps(rec.source_refs, sort_keys=True), json.dumps(rec.attrs, sort_keys=True),
+                rec.superseded_by, now, now,
             ),
         )
 
@@ -225,9 +191,10 @@ def _filter_sql(f: Filter) -> tuple[list[str], list[str]]:
 
 def _record_from_row(row: sqlite3.Row) -> Record:
     return Record(
-        id=row["id"], entity_type=row["entity_type"], title=row["title"], topic=row["topic"],
+        id=row["id"], entity_id=row["entity_id"], entity_type=row["entity_type"], title=row["title"], topic=row["topic"],
         content=row["content"], role=Role(row["role"]), lifecycle=Lifecycle(row["lifecycle"]),
-        scope_path=row["scope_path"], source_refs=json.loads(row["source_refs_json"]), superseded_by=row["superseded_by"],
+        scope_path=row["scope_path"], source_refs=json.loads(row["source_refs_json"]),
+        attrs=json.loads(row["attrs_json"]), superseded_by=row["superseded_by"],
     )
 
 

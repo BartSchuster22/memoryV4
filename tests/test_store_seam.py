@@ -59,8 +59,26 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
 
     with sqlite3.connect(tmp_path / "memoryv4.sqlite3") as conn:
         actions = [row[0] for row in conn.execute("SELECT action FROM audit_events ORDER BY id")]
+        migrated_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        migrations = [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
 
     assert actions == ["create_record", "transition", "create_record", "supersede"]
+    assert {
+        "schema_migrations",
+        "entities",
+        "records",
+        "relations",
+        "artifacts",
+        "audit_events",
+        "retrieval_events",
+        "health_findings",
+    }.issubset(migrated_tables)
+    assert migrations == ["0001_core_governed_objects"]
 
 
 def test_sqlite_store_writes_health_findings_without_canonical_mutation(tmp_path: Path) -> None:
