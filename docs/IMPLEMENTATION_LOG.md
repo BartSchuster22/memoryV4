@@ -23,9 +23,19 @@ This run added the first bounded Store seam while keeping SQLite as the only imp
 - Removed board-local watchdog/orchestration files from the core repo and added a regression test for the slim-core boundary.
 - Updated docs for architecture, operations, API, QA/phase status, and this step log.
 
+## P2 additive migrations
+
+This run added the P2 additive migration slice from the rollback baseline:
+
+- Reworked the migration harness around explicit `Migration` objects with non-empty `up_sql` and `down_sql`.
+- Added `0006_record_embeddings` through `0012_health_findings`, intentionally leaving `0003`-`0005` absent.
+- Kept migrations SQLite-only, additive, rerunnable, and reversible for the objects/columns they introduce.
+- Added a seeded P1 upgrade fixture that verifies existing governed rows survive and receive `scope_path='global'` defaults.
+- Added `make qa10-gate-1` and a partial P2 QA10 scorecard writer.
+
 ## Evidence
 
-Local validation during this run:
+Local validation during P1:
 
 - `python3 -m pytest tests/test_store_seam.py -q` went RED first on the missing Store seam and then GREEN after implementation.
 - `python3 -m pytest -q` passed after implementation.
@@ -33,6 +43,13 @@ Local validation during this run:
 - `make qa10` emitted the P1 pending scorecard.
 - `docker build -t memoryv4-core:p0-p1 .` passed.
 - Container smoke passed: `GET /health` returned `{"service":"memoryv4-core","status":"ok","storage_backend":"sqlite","version":"0.1.0-d0"}`.
+
+Local validation during P2:
+
+- `python3 -m pytest tests/test_migrations_p2.py -q` went RED first on the missing P2 migration/rollback harness and then GREEN after implementation.
+- `python3 -m pytest -q` passed after updating Store seam expectations for P2 migrations.
+- `make qa10-gate-1` passed fresh DB, seeded upgrade fixture, rerun/no-op, and down-path checks.
+- `make qa10` emitted `build/qa10-scorecard.json` with Gate 1 passing and later gates pending.
 
 ## Commit discipline
 
