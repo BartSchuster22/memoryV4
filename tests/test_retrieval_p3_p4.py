@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
 from app.embeddings import EmbeddingProvider, EmbeddingUnavailable
 from app.models import Filter, Lifecycle, Record, Role
-from app.retrieval import HybridRetriever, SearchResult, reciprocal_rank_fusion
+from app.retrieval import HybridRetriever, MAX_GOVERNANCE_PRIOR, SearchResult, reciprocal_rank_fusion
 from app.storage import SqliteStore
 
 
@@ -23,6 +24,11 @@ class MappingProvider(EmbeddingProvider):
         if self.unavailable:
             raise EmbeddingUnavailable("test provider unavailable")
         return self.vectors[text]
+
+
+class TimeoutProvider(MappingProvider):
+    def embed(self, text: str) -> list[float]:
+        raise TimeoutError("provider timed out")
 
 
 def _record(
@@ -111,6 +117,63 @@ def test_lexical_fallback_returns_bm25_results_when_embeddings_are_unavailable(t
 
     assert [result.record_id for result in results] == ["rec_lexical"]
     assert results[0].lanes == {"bm25": 1}
+
+
+def test_scope_prefix_filter_escapes_sql_like_wildcards(tmp_path: Path) -> None:
+    store = SqliteStore(tmp_path / "memoryv4.sqlite3")
+    store.create_record(_record("rec_literal", title="Literal", content="alpha", scope_path="org:acme/project:a_b"), actor="tester")
+    store.create_record(_record("rec_wildcard_leak", title="Leak", content="alpha", scope_path="org:acme/project:acb/team:red"), actor="tester")
+
+    assert store.lexical_rank("alpha", Filter(scope_prefixes=["org:acme/project:a_b"]), 10) == ["rec_literal"]
+
+
+def test_governance_prior_cannot_overcome_large_rrf_rank_gap() -> None:
+    assert MAX_GOVERNANCE_PRIOR < (1 / 61 - 1 / 70)
+
+
+def test_search_degrades_to_lexical_on_timeout_and_vector_lane_failure(tmp_path: Path) -> None:
+    store = SqliteStore(tmp_path / "memoryv4.sqlite3")
+    store.create_record(_record("rec_lexical", title="Timeout fallback", content="exact match"), actor="tester")
+
+    timeout_results = HybridRetriever(store, TimeoutProvider({})).search("exact match", Filter(scope_prefixes=["org:acme"]), k=5)
+    assert [result.record_id for result in timeout_results] == ["rec_lexical"]
+    assert timeout_results[0].lanes == {"bm25": 1}
+
+    class BrokenVectorStore(SqliteStore):
+        def vector_rank(self, qvec: Sequence[float], f: Filter, k: int, *, model: str | None = None) -> list[str]:
+            raise TimeoutError("vector lane timed out")
+
+    broken = BrokenVectorStore(tmp_path / "broken.sqlite3")
+    broken.create_record(_record("rec_lexical", title="Vector fallback", content="exact match"), actor="tester")
+    provider = MappingProvider({"exact match": [1.0, 0.0, 0.0]})
+    vector_failure_results = HybridRetriever(broken, provider).search("exact match", Filter(scope_prefixes=["org:acme"]), k=5)
+    assert [result.record_id for result in vector_failure_results] == ["rec_lexical"]
+    assert vector_failure_results[0].lanes == {"bm25": 1}
+
+
+def test_hybrid_vector_lane_filters_embedding_model_metadata(tmp_path: Path) -> None:
+    store = SqliteStore(tmp_path / "memoryv4.sqlite3")
+    store.create_record(_record("rec_model_a", title="A", content="model-a-vector"), actor="tester")
+    store.create_record(_record("rec_model_b", title="B", content="model-b-vector"), actor="tester")
+    provider_a = MappingProvider(
+        {
+            "A\nretrieval\nmodel-a-vector": [1.0, 0.0, 0.0],
+            "B\nretrieval\nmodel-b-vector": [1.0, 0.0, 0.0],
+        }
+    )
+
+    assert store.backfill_embeddings(provider_a, Filter(scope_prefixes=["org:acme/project:alpha"])) == 2
+    with sqlite3.connect(tmp_path / "memoryv4.sqlite3") as conn:
+        conn.execute("UPDATE record_embeddings SET model = ? WHERE record_id = ?", ("test-mapping-v2", "rec_model_b"))
+    assert store.vector_rank([1.0, 0.0, 0.0], Filter(scope_prefixes=["org:acme"]), 10, model="test-mapping-v2") == [
+        "rec_model_b"
+    ]
+    provider_query = MappingProvider({"semantic only": [1.0, 0.0, 0.0]})
+    provider_query.model = "test-mapping-v2"
+    assert [
+        result.record_id
+        for result in HybridRetriever(store, provider_query).search("semantic only", Filter(scope_prefixes=["org:acme"]), k=10)
+    ] == ["rec_model_b"]
 
 
 def test_reciprocal_rank_fusion_uses_default_k_60_and_stable_tiebreaks() -> None:

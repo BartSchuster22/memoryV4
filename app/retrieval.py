@@ -11,11 +11,11 @@ from app.ports import Store
 RRF_K = 60
 DEFAULT_RRF_K = RRF_K
 _GOVERNANCE_PRIOR = {
-    (Role.CANONICAL.value, Lifecycle.LIVE.value): 0.010,
-    (Role.ACTIVE.value, Lifecycle.LIVE.value): 0.006,
-    (Role.EVIDENCE.value, Lifecycle.LIVE.value): 0.003,
+    (Role.CANONICAL.value, Lifecycle.LIVE.value): 0.0010,
+    (Role.ACTIVE.value, Lifecycle.LIVE.value): 0.0006,
+    (Role.EVIDENCE.value, Lifecycle.LIVE.value): 0.0003,
 }
-MAX_GOVERNANCE_PRIOR = 0.010
+MAX_GOVERNANCE_PRIOR = 0.0010
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,13 @@ class HybridRetriever:
         lanes: list[tuple[str, list[str]]] = [("bm25", bm25_ids)]
         try:
             qvec = self.provider.embed(query)
-        except (EmbeddingUnavailable, RuntimeError, KeyError):
+        except (EmbeddingUnavailable, RuntimeError, KeyError, TimeoutError, ConnectionError, OSError):
             qvec = []
         if qvec:
-            vector_ids = self.store.vector_rank(qvec, f, k)
+            try:
+                vector_ids = self.store.vector_rank(qvec, f, k, model=self.provider.model)
+            except (RuntimeError, TimeoutError, ConnectionError, OSError):
+                vector_ids = []
             if vector_ids:
                 lanes.append(("vector", vector_ids))
         fused = reciprocal_rank_fusion([ids for _, ids in lanes])

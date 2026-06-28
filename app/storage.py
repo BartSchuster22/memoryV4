@@ -101,7 +101,7 @@ class SqliteStore:
         ranked = _bm25_rank(terms, docs)
         return [rid for rid, _ in ranked[:k]]
 
-    def vector_rank(self, qvec: Sequence[float], f: Filter, k: int) -> list[str]:
+    def vector_rank(self, qvec: Sequence[float], f: Filter, k: int, *, model: str | None = None) -> list[str]:
         if not qvec or k <= 0:
             return []
         clauses, params = _filter_sql(f)
@@ -110,6 +110,9 @@ class SqliteStore:
             FROM records
             JOIN record_embeddings ON record_embeddings.record_id = records.id
             WHERE """ + " AND ".join(clauses)
+        if model is not None:
+            sql += " AND record_embeddings.model = ? AND record_embeddings.dimensions = ?"
+            params.extend([model, len(qvec)])
         ranked: list[tuple[float, str]] = []
         with self._connect() as conn:
             for row in conn.execute(sql, params).fetchall():
@@ -216,9 +219,9 @@ def probe_sqlite(database_path: Path) -> StorageHealth:
     return SqliteStore(database_path).quick_check()
 
 
-def _filter_sql(f: Filter) -> tuple[list[str], list[str]]:
+def _filter_sql(f: Filter) -> tuple[list[str], list[Any]]:
     clauses = ["1 = 1"]
-    params: list[str] = []
+    params: list[Any] = []
     if f.entity_type is not None:
         clauses.append("entity_type = ?")
         params.append(f.entity_type)
@@ -234,14 +237,18 @@ def _filter_sql(f: Filter) -> tuple[list[str], list[str]]:
     if f.scope_prefixes:
         scope_clauses: list[str] = []
         for scope in f.scope_prefixes:
-            scope_clauses.append("(scope_path = ? OR scope_path LIKE ?)")
-            params.extend([scope, f"{scope}/%"])
+            scope_clauses.append("(scope_path = ? OR scope_path LIKE ? ESCAPE '\\')")
+            params.extend([scope, f"{_escape_like(scope)}/%"])
         clauses.append("(" + " OR ".join(scope_clauses) + ")")
     return clauses, params
 
 
 def _record_embedding_text(title: str, topic: str, content: str) -> str:
     return f"{title}\n{topic}\n{content}"
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _tokenize(text: str) -> list[str]:
