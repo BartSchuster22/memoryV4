@@ -12,6 +12,8 @@ Hard boundaries for this repository:
 ```bash
 python3 -m pip install -r requirements-dev.txt
 make test
+make lint
+make qa
 make run
 make docker-build
 make qa10
