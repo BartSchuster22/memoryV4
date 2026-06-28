@@ -228,11 +228,9 @@ CORE_MIGRATIONS: tuple[Migration, ...] = (
         DROP INDEX IF EXISTS idx_relations_scope;
         DROP INDEX IF EXISTS idx_entities_scope;
         DROP INDEX IF EXISTS idx_records_scope;
-        ALTER TABLE retrieval_events DROP COLUMN scope_path;
-        ALTER TABLE artifacts DROP COLUMN scope_path;
-        ALTER TABLE relations DROP COLUMN scope_path;
-        ALTER TABLE entities DROP COLUMN scope_path;
-        ALTER TABLE records DROP COLUMN scope_path;
+        -- The scope_path columns can predate this migration in P1-lineage
+        -- databases. Rollback only removes the indexes introduced here so
+        -- existing scope metadata is never destroyed.
         """,
     ),
     Migration(

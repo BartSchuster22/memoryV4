@@ -76,8 +76,13 @@ def test_p2_migrations_fresh_db_are_idempotent_and_have_down_paths(tmp_path: Pat
         assert "entities" in remaining_tables
         assert "promotion_log" not in remaining_tables
         assert "record_embeddings" not in remaining_tables
-        assert "scope_path" not in _columns(conn, "records")
-        assert "scope_path" not in _columns(conn, "entities")
+        # 0011_scope rollback is non-destructive because scope_path can
+        # predate the migration on P1-lineage databases; only its indexes are
+        # removed.
+        assert "scope_path" in _columns(conn, "records")
+        assert "scope_path" in _columns(conn, "entities")
+        assert "idx_records_scope" not in _indexes(conn)
+        assert "idx_entities_scope" not in _indexes(conn)
 
 
 def test_p2_migrations_upgrade_seeded_v3_like_fixture_without_core_data_loss(tmp_path: Path) -> None:
@@ -170,6 +175,87 @@ def test_p2_migrations_upgrade_seeded_v3_like_fixture_without_core_data_loss(tmp
             ("session:1", "rec_1", "tier3"),
         )
         assert conn.execute("SELECT COUNT(*) FROM promotion_log WHERE source_ref='session:1'").fetchone()[0] == 1
+
+
+def test_scope_rollback_preserves_preexisting_p1_scope_columns_and_data(tmp_path: Path) -> None:
+    db = tmp_path / "p1-scoped-upgrade.sqlite3"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            INSERT INTO schema_migrations(version) VALUES ('0001_core_governed_objects'), ('0002_record_author_and_write_policy');
+            CREATE TABLE entities (
+                id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                scope_path TEXT NOT NULL DEFAULT 'global',
+                attrs_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE records (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT REFERENCES entities(id),
+                entity_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                content TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('canonical','active','evidence','exhaust')),
+                lifecycle TEXT NOT NULL CHECK(lifecycle IN ('live','working','superseded','archived','expired')),
+                scope_path TEXT NOT NULL DEFAULT 'global',
+                author_actor TEXT NOT NULL DEFAULT 'unknown:migrated',
+                write_policy_json TEXT NOT NULL DEFAULT '{}',
+                source_refs_json TEXT NOT NULL DEFAULT '[]',
+                attrs_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by TEXT REFERENCES records(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE relations (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('canonical','active','evidence','exhaust')),
+                lifecycle TEXT NOT NULL CHECK(lifecycle IN ('live','working','superseded','archived','expired')),
+                scope_path TEXT NOT NULL DEFAULT 'global',
+                attrs_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE artifacts (
+                id TEXT PRIMARY KEY,
+                artifact_type TEXT NOT NULL,
+                uri TEXT NOT NULL,
+                media_type TEXT,
+                role TEXT NOT NULL CHECK(role IN ('canonical','active','evidence','exhaust')),
+                lifecycle TEXT NOT NULL CHECK(lifecycle IN ('live','working','superseded','archived','expired')),
+                scope_path TEXT NOT NULL DEFAULT 'global',
+                attrs_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, actor TEXT NOT NULL, record_id TEXT, detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+            CREATE TABLE retrieval_events (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT NOT NULL, actor TEXT NOT NULL, scope_path TEXT NOT NULL DEFAULT 'global', record_ids_json TEXT NOT NULL DEFAULT '[]', detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+            INSERT INTO entities(id, entity_type, name, scope_path, created_at, updated_at) VALUES ('ent_1', 'person', 'Alice', 'org:acme/project:x', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            INSERT INTO records(id, entity_id, entity_type, title, topic, content, role, lifecycle, scope_path, author_actor, created_at, updated_at) VALUES ('rec_1', 'ent_1', 'decision', 'Keep scoped data', 'architecture', 'Scope survives rollback.', 'canonical', 'live', 'org:acme/project:x', 'human:architect', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            INSERT INTO relations(id, source_id, target_id, relation_type, role, lifecycle, scope_path, created_at, updated_at) VALUES ('rel_1', 'rec_1', 'ent_1', 'about', 'canonical', 'live', 'org:acme/project:x', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            INSERT INTO artifacts(id, artifact_type, uri, role, lifecycle, scope_path, created_at, updated_at) VALUES ('art_1', 'note', 'file:///tmp/note.md', 'evidence', 'live', 'org:acme/project:x', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            INSERT INTO retrieval_events(query, actor, scope_path, record_ids_json, created_at) VALUES ('scope?', 'human:reader', 'org:acme/project:x', '["rec_1"]', '2026-01-01T00:00:00Z');
+            """
+        )
+
+        assert "0011_scope" in run_migrations(conn)
+        rollback_migration(conn, "0011_scope")
+
+        for table in ("records", "entities", "relations", "artifacts", "retrieval_events"):
+            assert "scope_path" in _columns(conn, table)
+        assert conn.execute("SELECT scope_path FROM records WHERE id='rec_1'").fetchone() == ("org:acme/project:x",)
+        assert conn.execute("SELECT scope_path FROM entities WHERE id='ent_1'").fetchone() == ("org:acme/project:x",)
+        assert conn.execute("SELECT scope_path FROM relations WHERE id='rel_1'").fetchone() == ("org:acme/project:x",)
+        assert conn.execute("SELECT scope_path FROM artifacts WHERE id='art_1'").fetchone() == ("org:acme/project:x",)
+        assert conn.execute("SELECT scope_path FROM retrieval_events WHERE query='scope?'").fetchone() == ("org:acme/project:x",)
+        assert not {"idx_records_scope", "idx_entities_scope", "idx_relations_scope", "idx_artifacts_scope", "idx_retrieval_events_scope"} & _indexes(conn)
 
 
 def test_embedding_feature_flag_falls_back_when_sqlite_vec_is_unavailable(tmp_path: Path) -> None:
