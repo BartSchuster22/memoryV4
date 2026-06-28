@@ -340,16 +340,19 @@ def _ensure_scope_columns(conn: sqlite3.Connection) -> list[tuple[str, str, str]
             conn.execute(f"ALTER TABLE {table} ADD COLUMN scope_path TEXT NOT NULL DEFAULT 'global'")
             introduced_objects.append(("column", table, "scope_path"))
     scope_indexes = {
-        "records": "idx_records_scope",
-        "entities": "idx_entities_scope",
-        "relations": "idx_relations_scope",
-        "artifacts": "idx_artifacts_scope",
-        "retrieval_events": "idx_retrieval_events_scope",
+        "records": ("idx_records_scope", "CREATE INDEX IF NOT EXISTS idx_records_scope ON records(scope_path)"),
+        "entities": ("idx_entities_scope", "CREATE INDEX IF NOT EXISTS idx_entities_scope ON entities(scope_path)"),
+        "relations": ("idx_relations_scope", "CREATE INDEX IF NOT EXISTS idx_relations_scope ON relations(scope_path)"),
+        "artifacts": ("idx_artifacts_scope", "CREATE INDEX IF NOT EXISTS idx_artifacts_scope ON artifacts(scope_path)"),
+        "retrieval_events": (
+            "idx_retrieval_events_scope",
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_events_scope ON retrieval_events(scope_path)",
+        ),
     }
-    for table, index_name in scope_indexes.items():
+    for table, (index_name, create_sql) in scope_indexes.items():
         if _table_exists(conn, table):
             index_existed = _index_exists(conn, index_name)
-            conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}(scope_path)")
+            conn.execute(create_sql)
             if not index_existed:
                 introduced_objects.append(("index", table, index_name))
     return introduced_objects
@@ -405,6 +408,14 @@ def _migration_introduced_object(
 
 
 def _rollback_scope_path_objects(conn: sqlite3.Connection, version: str) -> None:
+    drop_index_sql = {
+        "idx_records_scope": "DROP INDEX IF EXISTS idx_records_scope",
+        "idx_entities_scope": "DROP INDEX IF EXISTS idx_entities_scope",
+        "idx_relations_scope": "DROP INDEX IF EXISTS idx_relations_scope",
+        "idx_artifacts_scope": "DROP INDEX IF EXISTS idx_artifacts_scope",
+        "idx_retrieval_events_scope": "DROP INDEX IF EXISTS idx_retrieval_events_scope",
+    }
+    scoped_tables = {"records", "entities", "relations", "artifacts", "retrieval_events"}
     rows = conn.execute(
         """
         SELECT object_type, table_name, object_name
@@ -415,9 +426,9 @@ def _rollback_scope_path_objects(conn: sqlite3.Connection, version: str) -> None
         (version,),
     ).fetchall()
     for object_type, table_name, object_name in rows:
-        if object_type == "index":
-            conn.execute(f"DROP INDEX IF EXISTS {object_name}")
-        elif object_type == "column":
+        if object_type == "index" and object_name in drop_index_sql:
+            conn.execute(drop_index_sql[object_name])
+        elif object_type == "column" and table_name in scoped_tables and object_name == "scope_path":
             _drop_column_if_exists(conn, table_name, object_name)
 
 
