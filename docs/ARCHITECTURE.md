@@ -1,40 +1,177 @@
 # MemoryV4 Architecture
 
-## P0-P1 baseline
+MemoryV4 is a lightweight, robust, single-container memory core. It rebuilds the useful MemoryV3 governance model into a smaller service while absorbing runtime-efficiency ideas from TencentDB Agent Memory without creating parallel memory stores. This repository is the memory core only: no Kanban orchestration, no explorer UI, no watchdog UI, and no cutover automation live here.
 
-MemoryV4 core is a slim, single-container FastAPI service with a public `/health` endpoint and a SQLite-only governed storage adapter. This repository is for the memory core only; explorer/UI and Kanban/orchestration live outside the core.
+This project phase creates the new core from scratch and does not cut over from, mutate, or depend on current MemoryV3/MemoryV4 production systems.
 
-## Non-negotiables
+## Target deployable
 
-1. One object model. Express Tencent-style Fact/Scene/Persona layers as governed V3-style records and relations. No parallel `facts`/`scenes` stores.
-2. Governance is the moat. Preserve roles `canonical`, `active`, `evidence`, `exhaust`; lifecycles `live`, `working`, `superseded`, `archived`, `expired`; supersession; audit trail; source references; and scoped keys.
-3. No autonomous process writes canonical. Distillation and health workers may write `working` records or findings only. A verification step promotes to `live`/`canonical`.
-4. Slim is a hard boundary. Memory core only. Kanban/orchestration and the web/explorer UI belong in separate repositories. PRs that re-add UI or orchestration to core are rejected.
-5. Additive migrations only. V3 data upgrades in place; every `up` has a `down`.
-6. Multi-tenant isolation is a safety property. A query at one scope must never surface another tenant's records.
+The target deployable is `memoryv4-core`:
 
-## Current package layout
+- FastAPI service exposing core memory APIs.
+- SQLite database stored on a mounted volume.
+- Store port plus SQLite adapter.
+- Governance, retrieval, audit, distillation, health-finding, and backup/restore logic.
+- Optional future modules behind explicit flags, not active by default.
 
-- `app/main.py`: FastAPI app factory and `/health` route.
-- `app/settings.py`: runtime settings. SQLite is the only configured storage backend.
-- `app/models.py`: governed core record, filter, lifecycle, role, and audit dataclasses.
-- `app/ports.py`: narrow `Store` Protocol used by core code.
-- `app/storage.py`: `SqliteStore`, the only implemented adapter. All SQL and SQLite behavior stays here.
-- `migrations/`: reserved for additive migrations.
-- `artifacts/`: optional local evidence root with no secrets or live memory exports.
+Out of scope for this repository:
 
-## Store seam
+- Web/explorer UI.
+- Kanban, board repair, watchdog, or orchestration systems.
+- Live MemoryV3 cutover tooling.
+- Postgres implementation.
+- Cross-tenant marketplace/public-memory workflows beyond reserving the governance boundary.
 
-The P1 storage seam is deliberately narrow:
+## Architecture sketch
 
-- governance CRUD: `create_record`, `get_record`, `transition`, `supersede`
-- retrieval lanes: `lexical_rank` and `vector_rank` return ranked record ids only
-- support writes: `write_audit` and `write_finding`
+```text
+Clients / agents
+   |
+   | scoped API key + requested scope
+   v
+FastAPI core
+   |
+   | validates auth, scope, and write policy
+   v
+Core services
+   |-- Governance service: roles, lifecycles, supersession, audit
+   |-- Retrieval service: lexical/vector lanes, fusion, governance prior, scope filter
+   |-- Distillation worker: session-derived working candidates only
+   |-- Health worker: findings for contradiction, compaction, decay, orphan checks
+   |-- Backup/restore service: SQLite-safe snapshots and verification
+   v
+Store port (engine-agnostic Protocol)
+   v
+SqliteStore (only implemented adapter now)
+   |-- records/entities/relations/artifacts
+   |-- audit_events/retrieval_events
+   |-- FTS and future vector tables
+   |-- promotion_log/health_findings
+   v
+SQLite database on persistent volume
+```
 
-`SqliteStore` initializes the P1 tables (`records`, `audit_events`, `health_findings`) and keeps WAL/SQL details behind the adapter. `vector_rank` is a reserved lane that returns no candidates until the embedding phase; this preserves SQLite-only baseline behavior while keeping the adapter boundary in place.
+## One object model
 
-Postgres is not implemented, configured, or imported in P1. It is a documented future adapter slot only.
+MemoryV4 uses one governed record model. Tencent-style cognitive layers are represented as records, relations, artifacts, and provenance, not as separate fact/scene/persona tables.
 
-## Deployable
+| Cognitive layer | MemoryV4 representation | Expected role/lifecycle | Provenance |
+| --- | --- | --- | --- |
+| Conversation exhaust | Imported source refs or exhaust records | `exhaust/live` | raw session reference |
+| Fact / atom | `record` | `active/working` then verified to `active/live` | source refs and audit event |
+| Scene / scenario | `record` plus `relation(derived_from)` to facts | `active/live` or `canonical/live` when verified | fact and session refs |
+| Persona / user profile | `record(entity_type=person_or_user_profile)` | `canonical/live` | relations to scenes/facts |
+| Decision | `record(entity_type=decision)` with rationale and alternatives | `canonical/live` or `active/live` | source refs and review actor |
+| Task canvas / symbolic offload | `artifact` plus task record and node refs | `active/working` or `active/live` | node id to artifact/source ref |
 
-The core deployable is one container built from `Dockerfile`. It persists SQLite at `/data/memoryv4.sqlite3`, exposes only the core FastAPI service, and contains no UI, explorer, Kanban, watchdog, or orchestration runtime code.
+Non-negotiable invariant: there are no independent `facts`, `scenes`, or `personas` stores that bypass governance.
+
+## Governance model
+
+Governance is the core product boundary. Every record is governed by:
+
+- `role`: `canonical`, `active`, `evidence`, or `exhaust`.
+- `lifecycle`: `live`, `working`, `superseded`, `archived`, or `expired`.
+- `scope_path`: owning tenant/project/agent/user/session path.
+- `write_policy`: explicit permissions for who/what can create, transition, supersede, or promote.
+- `author_actor`: the actor that proposed or wrote the record.
+- `source_refs`: durable references to evidence, sessions, or artifacts.
+- `audit_events`: append-only governance and mutation history.
+- `retrieval_events`: query/audit trail for retrieval behavior.
+
+Supersession preserves lineage. A superseded record remains addressable and auditable; it is not destructively overwritten.
+
+## Autonomous write invariant
+
+No autonomous process may write `canonical` records or promote anything to `canonical/live`.
+
+Allowed autonomous writes:
+
+- Distillation may propose `working` records with source refs.
+- Health worker may write findings for contradiction, compaction, decay, and orphan checks.
+- Maintenance jobs may write audit/retrieval telemetry and inert evidence.
+
+Forbidden autonomous writes:
+
+- Direct `canonical` creation.
+- Direct `working` to `live/canonical` promotion.
+- Direct contradiction resolution by overwriting one canonical record with another.
+- Direct writes to reserved `public` scope.
+
+Promotion to `canonical/live` requires an explicit verification actor governed by scoped auth and write policy.
+
+## Store port
+
+Core code depends on a narrow Store port. SQL, FTS, SQLite pragmas, vec0 details, transaction handling, and file paths stay inside `SqliteStore`.
+
+Initial Store responsibilities:
+
+- `create_record(record, actor)`
+- `get_record(record_id)`
+- `transition(record_id, lifecycle, actor)`
+- `supersede(old_id, new_record, actor)`
+- `lexical_rank(query, filter, k)` returning ranked record ids
+- `vector_rank(query_vector, filter, k)` returning ranked record ids when enabled
+- `write_audit(event)`
+- `write_finding(finding)`
+- backup/restore helpers owned by the SQLite adapter or operations layer
+
+Retrieval fusion belongs in core, not in the adapter. This keeps future storage adapters honest while avoiding dual-backend complexity now.
+
+## SQLite-only now
+
+SQLite is the only backend implemented in this phase.
+
+- No Postgres code is shipped now.
+- No runtime backend selector is required now.
+- Postgres remains a documented future adapter slot behind the Store port.
+- A Postgres adapter should only be built if a real tenant workload exceeds the practical SQLite one-file-per-slot operating model.
+
+## Retrieval shape
+
+Target retrieval uses:
+
+1. Lexical lane: SQLite FTS with BM25 ranking.
+2. Vector lane: optional SQLite vector table after embeddings are introduced.
+3. Fusion: reciprocal-rank fusion in core.
+4. Governance prior: bounded multiplier that nudges `canonical/live` without hiding highly relevant evidence.
+5. Scope filter: identical ancestor-or-equal scope enforcement in every lane.
+6. Audit: retrieval event logged with degraded/fallback state where applicable.
+
+Candidate gathering must happen before final limiting. This avoids the known bug where newest rows are limited before governance or relevance sorting.
+
+## Scope model
+
+Every record and entity has exactly one owning `scope_path`:
+
+```text
+global
+org:<org>
+org:<org>/project:<project>
+org:<org>/project:<project>/agent:<agent>
+org:<org>/project:<project>/agent:<agent>/user:<user>
+org:<org>/project:<project>/agent:<agent>/user:<user>/session:<session>
+public
+```
+
+Retrieval at a requested scope may return only:
+
+- records at ancestor-or-equal scopes; and
+- curated `public` records only when explicitly allowed by tenant policy.
+
+It must never return sibling tenant/project/agent/user/session records. The API auth layer must bind keys to an allowed scope subtree and reject requests outside that grant.
+
+`public` is reserved-only in this project phase. Nothing auto-promotes to `public`; public writes require explicit curator/admin authorization and a separate threat model.
+
+## Additive migration invariant
+
+All migrations are additive and reversible.
+
+- Existing governed tables are extended, not destructively rewritten.
+- Every `up` has a matching `down` for objects introduced by that migration.
+- Re-running migrations is idempotent.
+- Upgrade-from-real-V3 and fresh database paths are both tested before any future cutover.
+
+## Slim core invariant
+
+The memory core remains small and auditable. PRs that add UI, explorer, Kanban, workflow repair, or orchestration code to core are rejected. Integrations may call MemoryV4 through API contracts, but they do not live inside this repository.
