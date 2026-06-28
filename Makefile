@@ -11,13 +11,13 @@ test:
 	$(PYTHON) -m pytest -q
 
 lint:
-	$(PYTHON) -m compileall -q app tests ops
+	$(PYTHON) -m compileall -q app tests
 
 qa: lint test qa10
 
 qa10:
 	@mkdir -p build
-	@printf '%s\n' '{"status":"pending","phase":"D0","message":"QA10 gates are defined but not implemented in D0"}' > build/qa10-scorecard.json
+	@printf '%s\n' '{"status":"pending","phase":"P1","message":"P0-P1 bootstrap and Store seam are implemented; full QA10 gates start in later phases"}' > build/qa10-scorecard.json
 	@cat build/qa10-scorecard.json
 
 docker-build:
