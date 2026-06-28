@@ -91,7 +91,16 @@ def test_sqlite_store_satisfies_port_and_preserves_governed_record_lifecycle(tmp
         "retrieval_events",
         "health_findings",
     }.issubset(migrated_tables)
-    assert migrations == ["0001_core_governed_objects", "0002_record_author_and_write_policy"]
+    assert migrations == [
+        "0001_core_governed_objects",
+        "0002_record_author_and_write_policy",
+        "0006_record_embeddings",
+        "0007_promotion_log",
+        "0008_task_canvas",
+        "0009_registry_entity_types",
+        "0011_scope",
+        "0012_health_findings",
+    ]
 
 
 def test_sqlite_store_writes_health_findings_without_canonical_mutation(tmp_path: Path) -> None:
