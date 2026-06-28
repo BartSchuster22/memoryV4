@@ -21,6 +21,7 @@ make qa
 make qa10
 make run
 make docker-build
+make docker-test
 ```
 
 `make qa10` should eventually run the ten acceptance gates described in `docs/QA10.md` and emit a JSON scorecard. Until gates are implemented, placeholders must report pending/skipped honestly rather than claiming success.
@@ -43,6 +44,11 @@ Default persisted database path:
 ```
 
 The container should start the FastAPI app, initialize/open SQLite, enable required pragmas, and serve `/health`. It must not launch background UI, board automation, MemoryV3 cutover jobs, or separate orchestration loops.
+
+The same image is the local test container. Use `make docker-test` to rebuild
+`memoryv4-core:dev` and run the pytest suite inside the image with an ephemeral
+SQLite path under `/tmp`. This is the P0-P1 single-container dev/runtime gate;
+the default `CMD` remains the service runtime.
 
 ## Environment configuration
 

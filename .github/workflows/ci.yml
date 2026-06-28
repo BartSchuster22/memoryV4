@@ -27,6 +27,9 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Run tests in the container image
+        run: make docker-test
+
       - name: Emit QA10 placeholder scorecard
         run: make qa10
 

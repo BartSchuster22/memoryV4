@@ -4,10 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1     PYTHONUNBUFFERED=1     MEMORYV4_DB_PATH=/data/
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-dev.txt pyproject.toml Makefile ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 COPY app ./app
+COPY tests ./tests
 
 RUN mkdir -p /data
 VOLUME ["/data"]

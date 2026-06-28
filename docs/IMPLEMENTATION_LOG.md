@@ -43,6 +43,9 @@ Local validation during P1:
 - `make qa10` emitted the P1 pending scorecard.
 - `docker build -t memoryv4-core:p0-p1 .` passed.
 - Container smoke passed: `GET /health` returned `{"service":"memoryv4-core","status":"ok","storage_backend":"sqlite","version":"0.1.0-d0"}`.
+- `docker run --rm memoryv4-core:dev python -m pytest -q` went RED first because pytest/tests were not present in the image.
+- Added `make docker-test` and updated the Docker image/CI/docs so the same single image can run local pytest and boot as the runtime service.
+- `make docker-test` passed after the image update.
 
 Local validation during P2:
 

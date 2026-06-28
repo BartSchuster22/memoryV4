@@ -18,6 +18,7 @@ make qa            # lint + test + P2 migration QA scorecard
 make qa10-gate-1  # P2 fresh/upgrade/rerun/down migration gate
 make run           # uvicorn app.main:app on 127.0.0.1:8000
 make docker-build  # build memoryv4-core:dev
+make docker-test   # build image and run pytest inside the same container image
 ```
 
 ## Container boot smoke
@@ -32,6 +33,15 @@ Expected health response:
 ```json
 {"status":"ok","service":"memoryv4-core","version":"0.1.0-d0","storage_backend":"sqlite"}
 ```
+
+The Docker image is also the local test container:
+
+```bash
+make docker-test
+```
+
+This keeps the P0-P1 dev/runtime contract to one image while preserving the
+default container command as the FastAPI runtime service.
 
 ## Runtime
 

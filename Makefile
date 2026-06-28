@@ -2,7 +2,7 @@ PYTHON ?= python3
 APP ?= app.main:app
 IMAGE ?= memoryv4-core:dev
 
-.PHONY: run test lint qa qa10 qa10-gate-1 docker-build
+.PHONY: run test lint qa qa10 qa10-gate-1 docker-build docker-test
 
 run:
 	$(PYTHON) -m uvicorn $(APP) --host 127.0.0.1 --port 8000
@@ -23,3 +23,6 @@ qa10: qa10-gate-1
 
 docker-build:
 	docker build -t $(IMAGE) .
+
+docker-test: docker-build
+	docker run --rm -e MEMORYV4_DB_PATH=/tmp/memoryv4-test.sqlite3 $(IMAGE) python -m pytest -q
