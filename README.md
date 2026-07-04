@@ -31,10 +31,53 @@ make docker-build
 make qa10
 ```
 
+## Single-container Docker runtime
+
+The supported packaged runtime is one MemoryV4 application container. It runs the
+FastAPI service and uses a SQLite database file at `MEMORYV4_DB_PATH`; do not add
+Postgres, Redis, a vector database, worker sidecars, or a separate frontend
+container to this deployment slice.
+
+Build the image:
+
+```bash
+docker build -t memoryv4-core:dev .
+```
+
+Run with a fresh named volume for runtime SQLite state:
+
+```bash
+docker volume create memoryv4-data
+docker run --rm --name memoryv4-core \
+  -p 8000:8000 \
+  -e MEMORYV4_DB_PATH=/data/memoryv4.sqlite3 \
+  -v memoryv4-data:/data \
+  memoryv4-core:dev
+```
+
+Verify health and migration/schema initialization from another shell:
+
+```bash
+curl -fsS http://127.0.0.1:8000/health
+docker exec memoryv4-core python - <<'PY'
+import sqlite3
+db = "/data/memoryv4.sqlite3"
+with sqlite3.connect(db) as conn:
+    print(conn.execute("select version from schema_migrations order by version").fetchall())
+PY
+```
+
+`docker-compose.yml` is optional local convenience only and defines exactly one
+application service plus its named volume:
+
+```bash
+docker compose up --build
+```
+
 ## Runtime configuration
 
 - `MEMORYV4_DB_PATH`: SQLite database path. Defaults to `/data/memoryv4.sqlite3`.
 - `MEMORYV4_API_KEYS`: JSON object mapping bearer token to granted `scope_path`, for example `{"dev-token":"org:acme/project:psi"}`.
 - `MEMORYV4_API_KEY` and `MEMORYV4_API_SCOPE`: single-key fallback when `MEMORYV4_API_KEYS` is not set.
 
-Only `GET /health` is public. All non-health routes require `Authorization: Bearer <token>` and reject requested scopes outside the token grant.
+Only `GET /health` is public. All non-health routes require bearer authorization and reject requested scopes outside the token grant.

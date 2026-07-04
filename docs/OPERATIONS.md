@@ -10,6 +10,57 @@
 - `make docker-build`: build the single core container image.
 - `make qa10`: write and print the current QA10 scorecard JSON.
 
+## Single-container Docker operations
+
+MemoryV4 is packaged as one application container. The container runs Uvicorn and
+stores runtime state in SQLite at `MEMORYV4_DB_PATH`, which defaults to
+`/data/memoryv4.sqlite3` in the image. No database container, queue, vector DB,
+worker sidecar, or separate frontend container is part of this slice.
+
+Build from the repository root:
+
+```bash
+docker build -t memoryv4-core:dev .
+```
+
+Start with a fresh named volume:
+
+```bash
+docker volume create memoryv4-data
+docker run --rm --name memoryv4-core \
+  -p 8000:8000 \
+  -e MEMORYV4_DB_PATH=/data/memoryv4.sqlite3 \
+  -v memoryv4-data:/data \
+  memoryv4-core:dev
+```
+
+Verify the running container:
+
+```bash
+curl -fsS http://127.0.0.1:8000/health
+docker exec memoryv4-core python - <<'PY'
+import sqlite3
+db = "/data/memoryv4.sqlite3"
+with sqlite3.connect(db) as conn:
+    print(conn.execute("PRAGMA quick_check").fetchone()[0])
+    print(conn.execute("select version from schema_migrations order by version").fetchall())
+PY
+```
+
+Expected verification output includes health JSON with `"status":"ok"`,
+`quick_check` equal to `ok`, and `0001_foundation` present in
+`schema_migrations`.
+
+Optional local Compose convenience:
+
+```bash
+docker compose up --build
+```
+
+The compose file must remain a single MemoryV4 app service. It may declare a
+named volume for `/data`, but must not define Postgres, Redis, vector DBs,
+workers, or frontend services.
+
 ## Runtime configuration
 
 - `MEMORYV4_DB_PATH`: SQLite database path. Defaults to `/data/memoryv4.sqlite3`.
