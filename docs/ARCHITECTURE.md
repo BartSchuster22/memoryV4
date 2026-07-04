@@ -1,31 +1,37 @@
 # MemoryV4 Architecture
 
-## D0 baseline
+## Foundation slice
 
-MemoryV4 core starts as a slim, single-container FastAPI service with a public `/health` endpoint and a SQLite-only storage probe. This repository is for the memory core only; explorer/UI and Kanban/orchestration live outside the core.
+MemoryV4 core is a slim FastAPI service around a governed memory object model and a SQLite-only store adapter. UI/explorer surfaces, Kanban/orchestration, distillation workers, health workers, vector embeddings, Postgres, and cutover logic are outside this repository slice unless added in a later reviewed phase.
 
 ## Non-negotiables
 
-1. One object model. Express Tencent-style Fact/Scene/Persona layers as governed V3-style records and relations. No parallel `facts`/`scenes` stores.
-2. Governance is the moat. Preserve roles `canonical`, `active`, `evidence`, `exhaust`; lifecycles `live`, `working`, `superseded`, `archived`, `expired`; supersession; `write_policy`; `author_actor`; `audit_events`; `retrieval_events`; and scoped keys.
-3. No autonomous process writes canonical. Distillation and health workers may write `working` records or findings only. A verification step promotes to `live`/`canonical`.
-4. Slim is a hard boundary. Memory core only. Kanban/orchestration and the web/explorer UI belong in separate repositories. PRs that re-add UI or orchestration to core are rejected.
-5. Additive migrations only. V3 data upgrades in place; every `up` has a `down`.
-6. Multi-tenant isolation is a safety property. A query at one scope must never surface another tenant's records.
+1. One object model. Fact/Scene/Persona/Decision concepts are represented as governed records and relations, not parallel fact stores.
+2. Governance is the moat. The foundation validates roles `canonical`, `active`, `evidence`, `exhaust`; lifecycles `live`, `working`, `superseded`, `archived`, `expired`; source/provenance fields; author metadata; audit events; retrieval events; and scoped keys.
+3. No autonomous process writes canonical. This service exposes governed write paths only; future autonomous workers must write `working` or findings unless a separate verification path promotes records.
+4. Slim boundary. Memory core only. UI/explorer and orchestration belong elsewhere.
+5. Additive migrations. The current `0001_foundation` migration has a reversible down path and is idempotent on rerun.
+6. Scope isolation is a safety property. Queries return records whose `scope_path` is an ancestor-or-equal of the requested scope. Sibling branches are excluded.
 
-## Current package layout
+## Package layout
 
-- `app/main.py`: FastAPI app factory and `/health` route.
-- `app/settings.py`: D0 runtime settings. SQLite is the only configured storage backend.
-- `app/storage.py`: tiny SQLite probe used by health checks. The full governed Store port comes later.
-- `migrations/`: reserved for additive migrations.
-- `ops/watchdogs/`: board-local operational aids, not runtime code.
-- `artifacts/`: durable evidence/watchdog state root with no secrets or live memory exports.
+- `app/main.py`: FastAPI app factory, health route, authenticated record/search routes, scope-aware authz.
+- `app/schemas.py`: Pydantic governed object model, role/lifecycle enums, scope helper.
+- `app/migrations.py`: additive SQLite migration registry and rollback helper.
+- `app/storage.py`: `Store` protocol and `SqliteStore` adapter. SQL, FTS5, WAL, and fallback search stay below this boundary.
+- `tests/test_foundation.py`: validators, migrations, store CRUD, audit/retrieval events, auth, search, and negative sibling leak tests.
+- `tests/test_health.py`: public health endpoint test.
 
-## Storage direction
+## Storage and retrieval
 
-SQLite is the only implemented backend now. The D0 container defaults to `/data/memoryv4.sqlite3` and exposes it as a Docker volume. A future Postgres adapter may be added behind a Store port only when real tenant concurrency demands it; D0 does not implement Postgres.
+SQLite is the only implemented backend. `SqliteStore` initializes the migration registry, creates the governed foundation tables, writes audit events inside governed write transactions, and records search/retrieval events. Search uses SQLite FTS5 and `bm25()` when available; minimal SQLite builds fall back to `LIKE` matching with the same scope filter applied.
 
-## Deployable
+## Scope model
 
-The core deployable is one container built from `Dockerfile`. Persistent storage, migrations, auth, and retrieval features are added by later phases.
+`scope_path` is a slash-separated owning path such as:
+
+```text
+org:acme/project:psi/agent:alice/user:u123/session:s001
+```
+
+A request at that scope can see `global`, `org:acme`, `org:acme/project:psi`, `org:acme/project:psi/agent:alice`, and so on through its exact requested scope. It cannot see sibling tenants/projects/agents/users. The reserved `public` scope exists in helpers only and is included only when a caller opts in with `include_public=true`; no automatic public promotion is implemented.

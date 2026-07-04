@@ -17,7 +17,7 @@ qa: lint test qa10
 
 qa10:
 	@mkdir -p build
-	@printf '%s\n' '{"status":"pending","phase":"D0","message":"QA10 gates are defined but not implemented in D0"}' > build/qa10-scorecard.json
+	@printf '%s\n' '{"status":"partial","phase":"foundation","pass":0,"partial":[1,2,3,5,6,8,9,10],"not_implemented":[4,7],"message":"Foundation slice only; see docs/QA10.md for gate status."}' > build/qa10-scorecard.json
 	@cat build/qa10-scorecard.json
 
 docker-build:
