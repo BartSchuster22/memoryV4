@@ -1,4 +1,4 @@
-PYTHON ?= python3
+PYTHON ?= python3.11
 APP ?= app.main:app
 IMAGE ?= memoryv4-core:dev
 
