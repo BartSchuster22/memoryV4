@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.migrations import migrate
 from app.pagination import decode_cursor, encode_cursor
+from app.recovery import recover_interrupted_restore
 from app.schemas import (
     Artifact,
     ArtifactCreate,
@@ -41,6 +42,7 @@ from app.schemas import (
     SortOrder,
     utc_now,
 )
+from app.sqlite_runtime import DatabaseLock, assert_integrity, connect_sqlite
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -94,18 +96,42 @@ class Store(Protocol):
 class SqliteStore:
     """SQLite-only adapter. SQL/FTS and transaction details stay below this boundary."""
 
-    def __init__(self, database_path: Path):
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        busy_timeout_ms: int = 5000,
+        integrity_check: str = "quick",
+    ):
         self.database_path = database_path
-        migrate(database_path)
+        self.busy_timeout_ms = busy_timeout_ms
+        self._lease: DatabaseLock | None = None
+        recover_interrupted_restore(database_path)
+        lease = DatabaseLock(database_path, exclusive=False).acquire()
+        try:
+            migrate(
+                database_path,
+                integrity_check=integrity_check,
+                busy_timeout_ms=busy_timeout_ms,
+            )
+        except Exception:
+            lease.close()
+            raise
+        self._lease = lease
+
+    def close(self) -> None:
+        if self._lease is not None:
+            self._lease.close()
+            self._lease = None
+
+    def __del__(self) -> None:
+        self.close()
 
     def _connect(self) -> sqlite3.Connection:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.database_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        return connect_sqlite(
+            self.database_path,
+            busy_timeout_ms=self.busy_timeout_ms,
+        )
 
     def _has_fts(self, conn: sqlite3.Connection) -> bool:
         row = conn.execute(
@@ -2094,11 +2120,14 @@ class SqliteStore:
         )
 
 
-def probe_sqlite(database_path: Path) -> dict[str, str]:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    migrate(database_path)
-    with sqlite3.connect(database_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        result = conn.execute("PRAGMA quick_check").fetchone()
-    status = "ok" if result and result[0] == "ok" else "degraded"
-    return {"backend": "sqlite", "path": str(database_path), "status": status}
+def probe_sqlite(database_path: Path, *, busy_timeout_ms: int = 5000) -> dict[str, str]:
+    try:
+        with connect_sqlite(
+            database_path,
+            busy_timeout_ms=busy_timeout_ms,
+            readonly=True,
+        ) as conn:
+            assert_integrity(conn, full=False)
+    except (sqlite3.DatabaseError, OSError, RuntimeError):
+        return {"backend": "sqlite", "path": str(database_path), "status": "degraded"}
+    return {"backend": "sqlite", "path": str(database_path), "status": "ok"}

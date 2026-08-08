@@ -35,3 +35,16 @@ Live impact:
 - Added governed audit/retrieval event queries and admin-only usage aggregation.
 - Added authorization, scope isolation, cursor, time-window, stale-version,
   idempotency, concurrency, capability, audit, and database-integrity coverage.
+
+## Phase 6 — persistence and recovery hardening
+
+- Hardened SQLite connections with WAL, FULL synchronization, foreign keys, bounded
+  busy waits, startup integrity checks, and process advisory leases.
+- Made each migration plus registry claim atomic and added applied-source checksums,
+  strict-prefix validation, and future-version rejection.
+- Added startup completion of interrupted restore and safe reconstruction of derived
+  FTS state from authoritative records.
+- Added manifested online backup, full structural/logical verification, checkpoint,
+  exclusive offline restore, pre-restore snapshots, and atomic/fsynced file swaps.
+- Added fault-injection, abrupt restart, corruption, tamper, lock, CLI, backup,
+  restore, and interrupted-recovery coverage.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hmac import compare_digest
 from uuid import uuid4
@@ -68,7 +70,7 @@ from app.storage import (
 )
 
 APP_NAME = "memoryv4-core"
-APP_VERSION = "0.5.0-review-audit-operations"
+APP_VERSION = "0.6.0-persistence-recovery"
 
 
 class AuthContext:
@@ -220,14 +222,35 @@ def _authorize_record_supersede(record: Record, auth: AuthContext) -> None:
 def create_app() -> FastAPI:
     """Create and configure the MemoryV4 core FastAPI application."""
     settings = load_settings()
+    store: SqliteStore | None = None
+
+    def initialize_store() -> SqliteStore:
+        nonlocal store
+        if store is None:
+            store = SqliteStore(
+                settings.database_path,
+                busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+                integrity_check=settings.startup_integrity_check,
+            )
+        return store
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        active_store = initialize_store()
+        try:
+            yield
+        finally:
+            active_store.close()
+
     app = FastAPI(
         title="MemoryV4 Core",
         version=settings.version,
         description="Slim governed memory core. UI and orchestration are out of scope.",
+        lifespan=lifespan,
     )
 
     def get_store() -> SqliteStore:
-        return SqliteStore(settings.database_path)
+        return initialize_store()
 
     @app.middleware("http")
     async def governance_envelope(request: Request, call_next):
@@ -237,14 +260,18 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         if request.method in {"POST", "PATCH", "PUT", "DELETE"} and response.status_code >= 400:
             reason = request.headers.get("X-MemoryV4-Reason")
-            get_store().write_denial(
-                operation=f"{request.method} {request.url.path}",
-                actor=request.state.actor,
-                scope_path=request.state.scope_path,
-                request_id=request.state.request_id,
-                status_code=response.status_code,
-                reason=reason[:500] if reason else None,
-            )
+            try:
+                get_store().write_denial(
+                    operation=f"{request.method} {request.url.path}",
+                    actor=request.state.actor,
+                    scope_path=request.state.scope_path,
+                    request_id=request.state.request_id,
+                    status_code=response.status_code,
+                    reason=reason[:500] if reason else None,
+                )
+            except sqlite3.DatabaseError:
+                # Never mask the original response when persistence is unavailable.
+                pass
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-MemoryV4-Contract-Version"] = CONTRACT_VERSION
         return response
@@ -303,6 +330,22 @@ def create_app() -> FastAPI:
             content=body.model_dump(mode="json"),
         )
 
+    @app.exception_handler(sqlite3.DatabaseError)
+    async def storage_error(request: Request, exc: sqlite3.DatabaseError) -> JSONResponse:
+        body = ErrorResponse(
+            error=ErrorBody(
+                code="storage_unavailable",
+                message="persistent storage is unavailable",
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                request_id=request.state.request_id,
+                details={},
+            )
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=body.model_dump(mode="json"),
+        )
+
     def require_auth(
         request: Request,
         authorization: str | None = Header(default=None),
@@ -339,7 +382,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["health"])
     def health() -> dict[str, str]:
-        storage = probe_sqlite(settings.database_path)
+        initialize_store()
+        storage = probe_sqlite(
+            settings.database_path,
+            busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+        )
         return {
             "status": "ok" if storage["status"] == "ok" else "degraded",
             "service": settings.service_name,

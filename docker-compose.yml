@@ -8,6 +8,8 @@ services:
       - "8000:8000"
     volumes:
       - memoryv4-data:/data
+      - memoryv4-backups:/backups
 
 volumes:
   memoryv4-data:
+  memoryv4-backups:

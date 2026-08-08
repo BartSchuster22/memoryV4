@@ -18,11 +18,18 @@ List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused
 
 | Method | Path | Permission | Purpose |
 |---|---|---|---|
-| GET | `/health` | public | SQLite quick-check and migration health |
+| GET | `/health` | public | Initialized SQLite integrity/readiness health |
 | GET | `/capabilities` | `memory.read` | Runtime operation/governance support |
 | GET | `/schema` | `memory.read` | Machine-readable object contract |
 
-Healthy runtime response version is `0.5.0-review-audit-operations`.
+Healthy runtime response version is `0.6.0-persistence-recovery`.
+
+Production lifespan startup acquires the database lease, completes any interrupted
+restore, applies atomically claimed migrations, validates migration history and
+SQLite integrity, and repairs derived FTS state. Startup fails closed on corruption
+or incompatible migration history. A database failure after startup returns a
+redacted `503 storage_unavailable`; health reports `degraded` without leaking paths
+or SQLite diagnostics.
 
 ## Entities
 

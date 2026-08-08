@@ -25,7 +25,10 @@ persist findings through the Store seam but do not run in this container.
 2. **Governance is in core.** Roles, lifecycle, write policy, actor identity, action grants, scope isolation, idempotency, optimistic versions, and mutation audit are enforced below every client.
 3. **No autonomous canonical writes.** Autonomous grants create only active/working candidates; canonical creation/promotion requires `memory.promote`.
 4. **Slim boundary.** UI and orchestration belong elsewhere.
-5. **Additive migrations.** `0001_foundation` through `0005_review_audit_operations` have ordered up/down paths.
+5. **Additive, claimed migrations.** `0001_foundation` through
+   `0005_review_audit_operations` have ordered up/down paths. Each pending migration
+   and its registry claim commit atomically; applied source checksums and a strict
+   prefix prevent drift, gaps, and accidental downgrade startup.
 6. **Scope isolation is graph-wide.** Direct/list/search/context reads use ancestor-or-equal visibility. New links require every referenced object to exist and be visible from the link scope, preventing sibling edges.
 7. **Opaque pagination state is not authority.** Cursors are bound to scope/query/filter/sort context; authorization is reevaluated on every page request.
 
@@ -36,17 +39,36 @@ persist findings through the Store seam but do not run in this container.
 - `app/schemas.py`: Pydantic object graph, validators, page envelopes, and context response.
 - `app/pagination.py`: opaque context-bound cursor codec.
 - `app/migrations.py`: additive SQLite migration registry and rollback helper.
+- `app/sqlite_runtime.py`: WAL/FULL-sync connections, advisory leases, checkpoints,
+  and integrity/foreign-key verification.
+- `app/recovery.py`: online backup, manifest verification, offline restore,
+  restore-journal recovery, and checkpoint CLI.
 - `app/storage.py`: SQLite Store adapter, transactions, FTS5, object integrity, pagination, and aggregation.
 - `tests/test_core_objects.py`: composite identity, object graph, pagination, filters, context, integrity, and scope tests.
 - `tests/test_governance.py`: permissions, write policy, delegation, idempotency/concurrency, promotion, and denial audit.
 - `tests/test_lifecycle.py`: transition matrix, exact restoration, atomic supersession, state integrity, concurrency, and audit.
 - `tests/test_operational_apis.py`: review, audit/retrieval queries, usage, scope,
   integrity, pagination, and concurrency.
+- `tests/test_persistence_recovery.py`: migration failure injection, WAL restart,
+  corruption handling, FTS repair, backup verification, and restore recovery.
 - `tests/test_foundation.py`, `tests/test_contract.py`, `tests/test_health.py`: migration/storage, contract, and health coverage.
 
 ## Storage and retrieval
 
-SQLite is the only backend. WAL and busy-timeout settings support serialized mutation claims. Mutation objects, audit events, and idempotency responses are committed in the same transaction. Existing FTS triggers continue to synchronize record title/content updates. Search uses FTS5 and `bm25()` when available and falls back to lexical `LIKE` matching with identical scope/object filters.
+SQLite is the only backend. WAL, `synchronous=FULL`, foreign keys, bounded busy
+timeouts, and advisory process leases protect the single-file runtime. Mutation
+objects, audit events, and idempotency responses commit in the same transaction.
+Startup verifies SQLite integrity and foreign keys, strictly validates migration
+history, and repairs the derived FTS index from authoritative records when needed.
+Unrecoverable corruption fails startup; runtime database errors produce a redacted
+`503 storage_unavailable`, and health degrades without exposing SQLite details.
+
+Online backups use SQLite's backup API rather than copying live DB/WAL files. A
+SHA-256/size/migration manifest, full integrity scan, JSON scan, FTS consistency
+check, fsync, and atomic rename produce a self-contained artifact. Restore requires
+that manifest and an exclusive service lease. A durable restore marker completes or
+rolls back an interrupted file swap before the next migration. See
+[Persistence and recovery](PERSISTENCE_RECOVERY.md).
 
 `0003_core_objects` rebuilds entity identity as `(entity_type,id)`, expands records with entity IDs/tags/confidence/supersession/deletion metadata, and replaces foundation relation/artifact layouts with typed references and versions. Existing rows are preserved with safe defaults.
 

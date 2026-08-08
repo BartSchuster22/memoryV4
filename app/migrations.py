@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.schemas import MigrationResult, utc_now
+from app.sqlite_runtime import SchemaCompatibilityError, assert_integrity, connect_sqlite
 
 MigrationFn = Callable[[sqlite3.Connection], None]
 
@@ -18,9 +21,26 @@ class Migration:
     up: MigrationFn
     down: MigrationFn
 
+    @property
+    def checksum(self) -> str:
+        source = (
+            f"{self.version}\n{inspect.getsource(_executescript)}\n"
+            f"{inspect.getsource(self.up)}\n{inspect.getsource(self.down)}"
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
 
 def _executescript(conn: sqlite3.Connection, sql: str) -> None:
-    conn.executescript(sql)
+    # sqlite3.executescript() commits pending work. Running complete statements
+    # individually keeps schema changes and their registry claim in one transaction.
+    statement = ""
+    for line in sql.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise sqlite3.OperationalError("incomplete migration SQL statement")
 
 
 def _up_0001(conn: sqlite3.Connection) -> None:
@@ -467,12 +487,7 @@ MIGRATIONS = [
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return connect_sqlite(path)
 
 
 def _ensure_registry(conn: sqlite3.Connection) -> None:
@@ -480,35 +495,137 @@ def _ensure_registry(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version TEXT PRIMARY KEY,
-          applied_at TEXT NOT NULL
+          applied_at TEXT NOT NULL,
+          checksum TEXT
         )
         """
     )
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(schema_migrations)")}
+    if "checksum" not in columns:
+        conn.execute("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT")
 
 
-def migrate(database_path: Path) -> MigrationResult:
+def _validate_migration_history(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT version, checksum FROM schema_migrations ORDER BY rowid"
+    ).fetchall()
+    expected = [migration.version for migration in MIGRATIONS]
+    versions = [str(row["version"]) for row in rows]
+    unknown = [version for version in versions if version not in expected]
+    if unknown:
+        raise SchemaCompatibilityError(f"database has unsupported migrations: {unknown}")
+    if versions != expected[: len(versions)]:
+        raise SchemaCompatibilityError(
+            f"database migration history is not a valid prefix: {versions}"
+        )
+    by_version = {migration.version: migration for migration in MIGRATIONS}
+    for row in rows:
+        checksum = row["checksum"]
+        expected_checksum = by_version[str(row["version"])].checksum
+        if checksum is not None and checksum != expected_checksum:
+            raise SchemaCompatibilityError(f"migration checksum mismatch: {row['version']}")
+    return versions
+
+
+def _adopt_legacy_checksums(conn: sqlite3.Connection) -> None:
+    for migration in MIGRATIONS:
+        conn.execute(
+            "UPDATE schema_migrations SET checksum = ? "
+            "WHERE version = ? AND checksum IS NULL",
+            (migration.checksum, migration.version),
+        )
+
+
+def ensure_fts_consistency(conn: sqlite3.Connection) -> bool:
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='records_fts'"
+    ).fetchone()
+    if present is None:
+        return False
+    mismatch = conn.execute(
+        """
+        SELECT EXISTS(
+          SELECT id, title, content FROM records
+          EXCEPT SELECT id, title, content FROM records_fts
+        ) OR EXISTS(
+          SELECT id, title, content FROM records_fts
+          EXCEPT SELECT id, title, content FROM records
+        )
+        """
+    ).fetchone()
+    if mismatch is None or not bool(mismatch[0]):
+        return False
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM records_fts")
+        conn.execute(
+            "INSERT INTO records_fts(rowid, id, title, content) "
+            "SELECT rowid, id, title, content FROM records"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return True
+
+
+def migrate(
+    database_path: Path,
+    *,
+    integrity_check: str = "quick",
+    busy_timeout_ms: int = 5000,
+) -> MigrationResult:
+    if integrity_check not in {"quick", "full"}:
+        raise ValueError("integrity_check must be 'quick' or 'full'")
     applied: list[str] = []
-    with _connect(database_path) as conn:
+    with connect_sqlite(database_path, busy_timeout_ms=busy_timeout_ms) as conn:
+        assert_integrity(conn, full=integrity_check == "full")
         _ensure_registry(conn)
-        existing = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
+        conn.commit()
+        existing = set(_validate_migration_history(conn))
+        conn.execute("BEGIN IMMEDIATE")
+        _adopt_legacy_checksums(conn)
+        conn.commit()
         for migration in MIGRATIONS:
             if migration.version in existing:
                 continue
-            migration.up(conn)
-            conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (migration.version, utc_now()),
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                migration.up(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at, checksum) "
+                    "VALUES (?, ?, ?)",
+                    (migration.version, utc_now(), migration.checksum),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             applied.append(migration.version)
+        _validate_migration_history(conn)
+        assert_integrity(conn, full=integrity_check == "full")
+        ensure_fts_consistency(conn)
     return MigrationResult(applied=applied)
 
 
 def rollback_all(database_path: Path) -> None:
     with _connect(database_path) as conn:
         _ensure_registry(conn)
+        conn.commit()
+        _validate_migration_history(conn)
         existing = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
         for migration in reversed(MIGRATIONS):
             if migration.version not in existing:
                 continue
-            migration.down(conn)
-            conn.execute("DELETE FROM schema_migrations WHERE version = ?", (migration.version,))
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                migration.down(conn)
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE version = ?",
+                    (migration.version,),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        assert_integrity(conn, full=False)

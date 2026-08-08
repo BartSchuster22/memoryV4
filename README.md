@@ -3,6 +3,8 @@
 MemoryV4 is a slim FastAPI memory core. This slice implements a governed SQLite-only
 object graph, scoped retrieval/context, record lifecycle, typed review findings,
 queryable audit/retrieval events, usage reporting, and additive migrations.
+It also provides hardened SQLite startup, verified online backup, and offline
+crash-recoverable restore tooling.
 
 The architecture and v1 contract are now locked:
 
@@ -44,6 +46,10 @@ Hard boundaries for this repository:
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.
 - Audit events for governed writes and retrieval events for search.
 - SQLite FTS5 search when available, with safe lexical fallback.
+- WAL with `synchronous=FULL`, foreign-key/integrity startup checks, atomic migration
+  claims, migration checksums, strict schema-history compatibility, and FTS repair.
+- Manifested online backup, verification, checkpoint, and exclusive offline restore
+  through `python -m app.recovery`.
 
 ## Local commands
 
@@ -74,10 +80,12 @@ Run with a fresh named volume for runtime SQLite state:
 
 ```bash
 docker volume create memoryv4-data
-docker run --rm --name memoryv4-core \
+docker volume create memoryv4-backups
+docker run -d --name memoryv4-core \
   -p 8000:8000 \
   -e MEMORYV4_DB_PATH=/data/memoryv4.sqlite3 \
   -v memoryv4-data:/data \
+  -v memoryv4-backups:/backups \
   memoryv4-core:dev
 ```
 
@@ -103,6 +111,9 @@ docker compose up --build
 ## Runtime configuration
 
 - `MEMORYV4_DB_PATH`: SQLite database path. Defaults to `/data/memoryv4.sqlite3`.
+- `MEMORYV4_SQLITE_BUSY_TIMEOUT_MS`: connection busy timeout, 100–60000 ms;
+  defaults to `5000`.
+- `MEMORYV4_STARTUP_INTEGRITY_CHECK`: `quick` (default) or `full`.
 - `MEMORYV4_API_KEYS`: JSON object mapping bearer token to a structured actor,
   `scope_path`, permissions, and optional `allow_actor_delegation` grant. Legacy
   token-to-scope strings are read/search/create-working only.
@@ -111,3 +122,7 @@ docker compose up --build
   permissions for the single-key fallback.
 
 Only `GET /health` is public. All non-health routes require bearer authorization and reject requested scopes outside the token grant.
+
+Use [the persistence/recovery runbook](docs/PERSISTENCE_RECOVERY.md) for verified
+backup and restore. Never copy a live SQLite main file without its WAL; use the
+online backup command instead.

@@ -33,9 +33,11 @@ class Settings:
     """Runtime settings for the private SQLite-only service."""
 
     service_name: str = "memoryv4-core"
-    version: str = "0.5.0-review-audit-operations"
+    version: str = "0.6.0-persistence-recovery"
     storage_backend: str = "sqlite"
     database_path: Path = Path("/data/memoryv4.sqlite3")
+    sqlite_busy_timeout_ms: int = 5000
+    startup_integrity_check: str = "quick"
     api_keys: dict[str, ApiKeyGrant] = field(default_factory=dict)
 
 
@@ -121,4 +123,15 @@ def _load_api_keys() -> dict[str, ApiKeyGrant]:
 
 def load_settings() -> Settings:
     db_path = Path(os.environ.get("MEMORYV4_DB_PATH", "/data/memoryv4.sqlite3"))
-    return Settings(database_path=db_path, api_keys=_load_api_keys())
+    busy_timeout = int(os.environ.get("MEMORYV4_SQLITE_BUSY_TIMEOUT_MS", "5000"))
+    if not 100 <= busy_timeout <= 120_000:
+        raise ValueError("MEMORYV4_SQLITE_BUSY_TIMEOUT_MS must be between 100 and 120000")
+    integrity_check = os.environ.get("MEMORYV4_STARTUP_INTEGRITY_CHECK", "quick").lower()
+    if integrity_check not in {"quick", "full"}:
+        raise ValueError("MEMORYV4_STARTUP_INTEGRITY_CHECK must be quick or full")
+    return Settings(
+        database_path=db_path,
+        sqlite_busy_timeout_ms=busy_timeout,
+        startup_integrity_check=integrity_check,
+        api_keys=_load_api_keys(),
+    )
