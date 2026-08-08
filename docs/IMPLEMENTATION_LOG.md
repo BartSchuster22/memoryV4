@@ -48,3 +48,17 @@ Live impact:
   exclusive offline restore, pre-restore snapshots, and atomic/fsynced file swaps.
 - Added fault-injection, abrupt restart, corruption, tamper, lock, CLI, backup,
   restore, and interrupted-recovery coverage.
+
+## Phase 7 — UNIFY MemoryV4 adapter
+
+- Added a dedicated, version-pinned MemoryV4 client to the UNIFY Gateway without
+  restoring the retired generic integration/federation subsystem.
+- Added an exact method/path/permission allowlist, UNIFY RBAC and CSRF admission,
+  delegated named-user identity, configured-scope confinement, idempotency,
+  optimistic-concurrency/reason forwarding, bounded retries, and circuit breaking.
+- Added fail-closed contract-header/JSON/error validation, response-size limits,
+  redacted failure normalization, and dual Gateway/MemoryV4 mutation audit.
+- Added file-mounted secret and optional Compose configuration plus contract,
+  authorization, scope, failure, retry, arbitrary-path, and route tests in UNIFY.
+- Documented the cross-service service grant, ownership, deployment, operations, and
+  live acceptance contract. No MemoryV3 mutation or cutover was performed.

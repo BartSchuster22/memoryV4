@@ -2,6 +2,8 @@
 
 The persistence and disaster-recovery contract is detailed in
 [PERSISTENCE_RECOVERY.md](PERSISTENCE_RECOVERY.md).
+The dedicated Gateway integration is defined in
+[UNIFY_ADAPTER.md](UNIFY_ADAPTER.md).
 
 ## Local commands
 
@@ -120,6 +122,11 @@ enforce action grants plus scope subtrees. `memory.review` closes findings,
 `memory.audit.read` queries audit/retrieval events, and `memory.admin` queries usage.
 Workers persist findings through the Store seam; this container has no worker
 sidecar or public finding-create route.
+
+For UNIFY, create a dedicated delegated-actor grant with the minimum required
+permissions and a non-global tenant scope. Keep the token only in UNIFY's mounted
+secret file. Contract negotiation uses `/capabilities` and requires
+`1.0.0`; actor-attributed audit must be verified before production use.
 
 ## Source-control and live boundary
 
