@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-KEY=/srv/memoryV4/.secrets/memoryV4_github_deploy_ed25519
+KEY=/home/herman/.hermes/profiles/chatboard/home/.ssh/memoryV4_deploy_ed25519_20260628
 export GIT_SSH_COMMAND="ssh -i ${KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 exec git "$@"
