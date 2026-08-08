@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 from hmac import compare_digest
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
+from app.contracts import (
+    CapabilitiesResponse,
+    ErrorBody,
+    ErrorResponse,
+    SchemaContractResponse,
+    capabilities,
+    schema_contract,
+)
 from app.schemas import Record, RecordCreate, ScopePath, SearchResult
 from app.settings import load_settings
 from app.storage import SqliteStore, probe_sqlite
@@ -37,6 +48,51 @@ def create_app() -> FastAPI:
         description="Slim governed memory core. UI and orchestration are out of scope.",
     )
 
+    @app.middleware("http")
+    async def attach_request_id(request: Request, call_next):
+        request.state.request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        response.headers["X-MemoryV4-Contract-Version"] = "1.0.0"
+        return response
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
+        code_by_status = {
+            401: "unauthorized",
+            403: "forbidden",
+            404: "not_found",
+            409: "conflict",
+            412: "precondition_failed",
+            428: "precondition_required",
+        }
+        body = ErrorResponse(
+            error=ErrorBody(
+                code=code_by_status.get(exc.status_code, "request_failed"),
+                message=str(exc.detail),
+                status=exc.status_code,
+                request_id=request.state.request_id,
+                details={},
+            )
+        )
+        return JSONResponse(status_code=exc.status_code, content=body.model_dump())
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        body = ErrorResponse(
+            error=ErrorBody(
+                code="invalid_request",
+                message="request validation failed",
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                request_id=request.state.request_id,
+                details={"violations": exc.errors()},
+            )
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=body.model_dump(mode="json"),
+        )
+
     def require_auth(authorization: str | None = Header(default=None)) -> AuthContext:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(
@@ -62,6 +118,26 @@ def create_app() -> FastAPI:
             "version": settings.version,
             "storage_backend": storage["backend"],
         }
+
+    @app.get(
+        "/capabilities",
+        response_model=CapabilitiesResponse,
+        tags=["contract"],
+        responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}},
+    )
+    def get_capabilities(auth: AuthContext = Depends(require_auth)) -> CapabilitiesResponse:
+        del auth
+        return capabilities(settings.service_name)
+
+    @app.get(
+        "/schema",
+        response_model=SchemaContractResponse,
+        tags=["contract"],
+        responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}},
+    )
+    def get_schema(auth: AuthContext = Depends(require_auth)) -> SchemaContractResponse:
+        del auth
+        return schema_contract()
 
     @app.post("/records", status_code=status.HTTP_201_CREATED, tags=["records"])
     def create_record(
