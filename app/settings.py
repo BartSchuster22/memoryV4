@@ -94,6 +94,12 @@ def _parse_grant(token: str, value: Any) -> ApiKeyGrant:
 
 def _load_api_keys() -> dict[str, ApiKeyGrant]:
     raw_json = os.environ.get("MEMORYV4_API_KEYS")
+    token = os.environ.get("MEMORYV4_API_KEY")
+    token_file = os.environ.get("MEMORYV4_API_KEY_FILE")
+    if sum(bool(value) for value in (raw_json, token, token_file)) > 1:
+        raise ValueError(
+            "set only one of MEMORYV4_API_KEYS, MEMORYV4_API_KEY, or MEMORYV4_API_KEY_FILE"
+        )
     if raw_json:
         parsed = json.loads(raw_json)
         if not isinstance(parsed, dict) or not all(
@@ -102,9 +108,18 @@ def _load_api_keys() -> dict[str, ApiKeyGrant]:
             raise ValueError("MEMORYV4_API_KEYS must be a JSON object mapping token to grant")
         return {token: _parse_grant(token, grant) for token, grant in parsed.items()}
 
-    token = os.environ.get("MEMORYV4_API_KEY")
+    if token_file:
+        try:
+            token = Path(token_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError("MEMORYV4_API_KEY_FILE cannot be read") from exc
+        if not token:
+            raise ValueError("MEMORYV4_API_KEY_FILE must not be empty")
     if not token:
         return {}
+    delegation_raw = os.environ.get("MEMORYV4_API_ALLOW_ACTOR_DELEGATION", "false").lower()
+    if delegation_raw not in {"true", "false"}:
+        raise ValueError("MEMORYV4_API_ALLOW_ACTOR_DELEGATION must be true or false")
     permissions = [item.strip() for item in os.environ.get(
         "MEMORYV4_API_PERMISSIONS",
         ",".join(permission.value for permission in LEGACY_PERMISSIONS),
@@ -116,6 +131,7 @@ def _load_api_keys() -> dict[str, ApiKeyGrant]:
                 "actor": os.environ.get("MEMORYV4_API_ACTOR", _legacy_actor(token)),
                 "scope_path": os.environ.get("MEMORYV4_API_SCOPE", "global"),
                 "permissions": permissions,
+                "allow_actor_delegation": delegation_raw == "true",
             },
         )
     }

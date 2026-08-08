@@ -1,0 +1,66 @@
+name: memory-v4
+
+services:
+  credential-init:
+    image: python:3.12-slim
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    restart: 'no'
+    command:
+      - python
+      - -c
+      - |
+        from pathlib import Path
+        source = Path('/run/secrets/api_key').read_bytes()
+        if not source.strip():
+            raise SystemExit('API key secret is empty')
+        destination = Path('/credential/api_key')
+        destination.write_bytes(source)
+        destination.chmod(0o444)
+    secrets: [api_key]
+    volumes: [memoryv4_credential:/credential]
+
+  memoryv4-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: memoryv4-core:production
+    user: '65532:65532'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 0.75
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+    tmpfs: ['/tmp:uid=65532,gid=65532,mode=0700']
+    environment:
+      MEMORYV4_DB_PATH: /data/memoryv4.sqlite3
+      MEMORYV4_API_KEY_FILE: /run/credential/api_key
+      MEMORYV4_API_SCOPE: ${MEMORYV4_API_SCOPE:?MEMORYV4_API_SCOPE is required}
+      MEMORYV4_API_ACTOR: unify:gateway
+      MEMORYV4_API_PERMISSIONS: memory.admin
+      MEMORYV4_API_ALLOW_ACTOR_DELEGATION: 'true'
+      MEMORYV4_STARTUP_INTEGRITY_CHECK: full
+    ports: ['127.0.0.1:${MEMORYV4_PORT:-28084}:8000']
+    volumes:
+      - memoryv4_data:/data
+      - memoryv4_backups:/backups
+      - memoryv4_credential:/run/credential:ro
+    depends_on:
+      credential-init: { condition: service_completed_successfully }
+
+secrets:
+  api_key:
+    file: ${MEMORYV4_API_KEY_SECRET_FILE:?MEMORYV4_API_KEY_SECRET_FILE is required}
+
+volumes:
+  memoryv4_data: {}
+  memoryv4_backups: {}
+  memoryv4_credential: {}

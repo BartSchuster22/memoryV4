@@ -108,6 +108,28 @@ application service plus its named volume:
 docker compose up --build
 ```
 
+### Hardened production compose
+
+`compose.production.yaml` packages the same single service with a loopback-only port,
+non-root UID, read-only root filesystem, dropped capabilities, `no-new-privileges`,
+resource limits, persistent data/backup volumes, full startup integrity checks, and a
+one-shot, network-isolated credential initializer. The application receives only a
+read-only credential volume; the host secret is never mounted into the long-running
+service.
+
+```bash
+export MEMORYV4_API_SCOPE=org:example
+export MEMORYV4_API_KEY_SECRET_FILE=/secure/path/memory_v4_token
+export MEMORYV4_PORT=28084
+docker compose -f compose.production.yaml config --quiet
+docker compose -f compose.production.yaml up -d --build
+docker compose -f compose.production.yaml ps
+curl -fsS http://127.0.0.1:28084/health
+```
+
+The production service remains separate from MemoryV3. Starting it does not perform a
+MemoryV3 cutover, migrate MemoryV3 data, or enable a consuming adapter automatically.
+
 ## Runtime configuration
 
 - `MEMORYV4_DB_PATH`: SQLite database path. Defaults to `/data/memoryv4.sqlite3`.
@@ -118,8 +140,11 @@ docker compose up --build
   `scope_path`, permissions, and optional `allow_actor_delegation` grant. Legacy
   token-to-scope strings are read/search/create-working only.
 - `MEMORYV4_API_KEY` and `MEMORYV4_API_SCOPE`: single-key fallback when `MEMORYV4_API_KEYS` is not set.
-- `MEMORYV4_API_ACTOR` and `MEMORYV4_API_PERMISSIONS`: actor and comma-separated
-  permissions for the single-key fallback.
+- `MEMORYV4_API_KEY_FILE`: file-backed alternative to `MEMORYV4_API_KEY`; exactly one of
+  the JSON, direct single-key, or file-backed key settings may be configured.
+- `MEMORYV4_API_ACTOR`, `MEMORYV4_API_PERMISSIONS`, and
+  `MEMORYV4_API_ALLOW_ACTOR_DELEGATION`: actor, comma-separated permissions, and an
+  explicit `true`/`false` delegated-actor switch for the single-key fallback.
 
 Only `GET /health` is public. All non-health routes require bearer authorization and reject requested scopes outside the token grant.
 
