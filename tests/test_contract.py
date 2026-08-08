@@ -64,12 +64,12 @@ def test_capability_inventory_is_unique_complete_and_truthful(tmp_path, monkeypa
 
     by_identity = {(item["method"], item["path"]): item for item in operations}
     assert by_identity[("GET", "/capabilities")]["status"] == "implemented"
-    assert by_identity[("POST", "/records")]["status"] == "foundation"
+    assert by_identity[("POST", "/records")]["status"] == "implemented"
     assert by_identity[("POST", "/records/{id}/promote")] == {
         "method": "POST",
         "path": "/records/{id}/promote",
         "permission": "memory.promote",
-        "status": "planned",
+        "status": "implemented",
         "mutation": True,
         "idempotency_required": True,
         "version_precondition_required": True,

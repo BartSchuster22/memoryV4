@@ -4,12 +4,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.migrations import migrate, rollback_all
+from app.migrations import MIGRATIONS, migrate, rollback_all
 from app.schemas import Lifecycle, RecordCreate, Role, ScopePath
 from app.storage import SqliteStore
 
 
-def client_for(tmp_path, monkeypatch, keys='{"tenant-a-key":"org:a","tenant-b-key":"org:b"}'):
+def client_for(
+    tmp_path,
+    monkeypatch,
+    keys=(
+        '{"tenant-a-key":{"actor":"tenant-a","scope_path":"org:a",'
+        '"permissions":["memory.admin"]},'
+        '"tenant-b-key":{"actor":"tenant-b","scope_path":"org:b",'
+        '"permissions":["memory.admin"]}}'
+    ),
+):
     db_path = tmp_path / "memoryv4.sqlite3"
     monkeypatch.setenv("MEMORYV4_DB_PATH", str(db_path))
     monkeypatch.setenv("MEMORYV4_API_KEYS", keys)
@@ -17,7 +26,10 @@ def client_for(tmp_path, monkeypatch, keys='{"tenant-a-key":"org:a","tenant-b-ke
 
 
 def auth(key="tenant-a-key"):
-    return {"Authorization": f"Bearer {key}"}
+    return {
+        "Authorization": f"Bearer {key}",
+        "Idempotency-Key": f"foundation-{key}",
+    }
 
 
 def test_record_validators_reject_bad_role_lifecycle_and_scope() -> None:
@@ -56,14 +68,65 @@ def test_migrations_are_idempotent_and_reversible(tmp_path) -> None:
         "artifacts",
         "audit_events",
         "retrieval_events",
+        "idempotency_requests",
         "schema_migrations",
     } <= tables
+    with sqlite3.connect(db_path) as conn:
+        record_columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
+    assert {"write_policy", "version"} <= record_columns
     rollback_all(db_path)
     with sqlite3.connect(db_path) as conn:
         remaining = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert "records" not in remaining
+
+
+def test_governance_migration_upgrades_existing_foundation_records(tmp_path) -> None:
+    db_path = tmp_path / "foundation-upgrade.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        MIGRATIONS[0].up(conn)
+        conn.execute(
+            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            ("0001_foundation", "2026-08-08T00:00:00+00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO records(
+              id, title, content, role, lifecycle, scope_path, entity_type, topic,
+              source_refs_json, provenance_json, attrs_json, author_actor,
+              superseded_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "rec_existing",
+                "Existing",
+                "Foundation content",
+                "active",
+                "working",
+                "org:a",
+                None,
+                None,
+                "[]",
+                "{}",
+                "{}",
+                "user:existing",
+                None,
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+
+    result = migrate(db_path)
+    assert result.applied == ["0002_governance"]
+    with sqlite3.connect(db_path) as conn:
+        upgraded = conn.execute(
+            "SELECT write_policy, version FROM records WHERE id = 'rec_existing'"
+        ).fetchone()
+    assert upgraded == ("author_only", 1)
 
 
 def test_store_crud_audit_search_and_scope_isolation(tmp_path) -> None:

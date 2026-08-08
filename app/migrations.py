@@ -134,7 +134,45 @@ def _down_0001(conn: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS = [Migration("0001_foundation", _up_0001, _down_0001)]
+def _up_0002(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        ALTER TABLE records ADD COLUMN write_policy TEXT NOT NULL DEFAULT 'author_only'
+          CHECK(write_policy IN ('team_editable','author_only','admin_only','immutable'));
+        ALTER TABLE records ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1);
+
+        CREATE TABLE idempotency_requests (
+          actor TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          response_json TEXT NOT NULL,
+          status_code INTEGER NOT NULL,
+          object_id TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(actor, idempotency_key)
+        );
+        CREATE INDEX idx_idempotency_created_at ON idempotency_requests(created_at);
+        """,
+    )
+
+
+def _down_0002(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        DROP TABLE IF EXISTS idempotency_requests;
+        ALTER TABLE records DROP COLUMN version;
+        ALTER TABLE records DROP COLUMN write_policy;
+        """,
+    )
+
+
+MIGRATIONS = [
+    Migration("0001_foundation", _up_0001, _down_0001),
+    Migration("0002_governance", _up_0002, _down_0002),
+]
 
 
 def _connect(path: Path) -> sqlite3.Connection:

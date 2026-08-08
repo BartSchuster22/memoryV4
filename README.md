@@ -6,6 +6,7 @@ The architecture and v1 contract are now locked:
 
 - [Tier-3 architecture ADR](docs/ADR-0001-TIER3-BOUNDARY.md)
 - [API/object/error contract v1](docs/CONTRACT_V1.md)
+- [Enforced governance model](docs/GOVERNANCE.md)
 - Authenticated `GET /capabilities` for truthful runtime support discovery
 - Authenticated `GET /schema` for the machine-readable object contract
 
@@ -20,10 +21,14 @@ Hard boundaries for this repository:
 - Public `GET /health`.
 - Authenticated `GET /capabilities` and `GET /schema` contract discovery.
 - Stable v1 request/contract headers and handled error envelope.
-- Authenticated `POST /records`, `GET /records`, `GET /records/{id}`, and `GET /search`.
+- Action-scoped grants, least-privileged legacy keys, and explicit UNIFY actor delegation.
+- Enforced write policies, protected canonical creation/promotion, and unified read visibility.
+- Idempotent record create/patch/promotion with optimistic concurrency and denial audit.
+- Authenticated governed `POST /records`, `GET /records`, `GET /records/{id}`,
+  `PATCH /records/{id}`, `POST /records/{id}/promote`, and `GET /search`.
 - Governed record model with roles `canonical`, `active`, `evidence`, `exhaust` and lifecycles `live`, `working`, `superseded`, `archived`, `expired`.
 - `scope_path` tenant isolation using ancestor-or-equal visibility. Sibling tenant/user/agent/project branches are not returned.
-- SQLite migration registry with reversible `0001_foundation` migration.
+- SQLite migration registry with reversible foundation and governance migrations.
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.
 - Audit events for governed writes and retrieval events for search.
 - SQLite FTS5 search when available, with safe lexical fallback.
@@ -86,7 +91,11 @@ docker compose up --build
 ## Runtime configuration
 
 - `MEMORYV4_DB_PATH`: SQLite database path. Defaults to `/data/memoryv4.sqlite3`.
-- `MEMORYV4_API_KEYS`: JSON object mapping bearer token to granted `scope_path`, for example `{"dev-token":"org:acme/project:psi"}`.
+- `MEMORYV4_API_KEYS`: JSON object mapping bearer token to a structured actor,
+  `scope_path`, permissions, and optional `allow_actor_delegation` grant. Legacy
+  token-to-scope strings are read/search/create-working only.
 - `MEMORYV4_API_KEY` and `MEMORYV4_API_SCOPE`: single-key fallback when `MEMORYV4_API_KEYS` is not set.
+- `MEMORYV4_API_ACTOR` and `MEMORYV4_API_PERMISSIONS`: actor and comma-separated
+  permissions for the single-key fallback.
 
 Only `GET /health` is public. All non-health routes require bearer authorization and reject requested scopes outside the token grant.

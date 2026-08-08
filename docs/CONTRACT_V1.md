@@ -60,6 +60,8 @@ Unauthorized direct-object access must return `404 not_found` where revealing ex
 - `If-Match: "<version>"` is also required for update, supersede, transition, promote, and finding resolution.
 - Lifecycle, supersession, promotion, deletion, restoration, and finding-resolution requests require a non-empty reason.
 - Authenticated identity is the actor; clients cannot choose `author_actor`.
+- A private gateway grant explicitly configured for actor delegation must send
+  `X-MemoryV4-Actor`; grants without that capability reject the header.
 - Reuse of an idempotency key with a different canonical request returns `409 idempotency_conflict`.
 - Stale versions return `412 version_conflict`; absent preconditions return `428 precondition_required`.
 - Successful and denied mutations emit durable audit events without secrets.

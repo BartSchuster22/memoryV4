@@ -120,7 +120,7 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="POST", path="/records", permission=Permission.create,
-        status=OperationStatus.foundation, mutation=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/records/{id}", permission=Permission.read,
@@ -128,7 +128,7 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="PATCH", path="/records/{id}", permission=Permission.edit,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
         version_precondition_required=True,
     ),
     CapabilityOperation(
@@ -143,7 +143,7 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="POST", path="/records/{id}/promote", permission=Permission.promote,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
         version_precondition_required=True, reason_required=True,
     ),
     CapabilityOperation(
@@ -320,6 +320,8 @@ def capabilities(service_name: str) -> CapabilitiesResponse:
             "autonomous_default": {"role": "active", "lifecycle": "working"},
             "canonical_promotion": "privileged-only",
             "scope_visibility": "ancestor-or-equal; siblings denied",
+            "actor_identity": "authenticated grant or explicitly delegated UNIFY actor",
+            "idempotency_scope": "per actor across mutations",
         },
         operations=OPERATIONS,
     )

@@ -7,7 +7,9 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.contracts import WritePolicy
 
 
 class Role(StrEnum):
@@ -76,10 +78,13 @@ def utc_now() -> str:
 
 
 class RecordCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1)
     role: Role
     lifecycle: Lifecycle
+    write_policy: WritePolicy = WritePolicy.author_only
     scope_path: str = "global"
     entity_type: str | None = None
     topic: str | None = None
@@ -99,6 +104,25 @@ class Record(RecordCreate):
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
     superseded_by: str | None = None
+    version: int = Field(default=1, ge=1)
+
+
+class RecordPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    content: str | None = Field(default=None, min_length=1)
+    topic: str | None = None
+    source_refs: list[str] | None = None
+    provenance: dict[str, Any] | None = None
+    attrs: dict[str, Any] | None = None
+    write_policy: WritePolicy | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> RecordPatch:
+        if not self.model_fields_set:
+            raise ValueError("at least one mutable field is required")
+        return self
 
 
 class SearchResult(BaseModel):

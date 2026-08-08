@@ -27,6 +27,8 @@ MemoryV4 core is a slim FastAPI service around a governed memory object model an
 - `app/storage.py`: `Store` protocol and `SqliteStore` adapter. SQL, FTS5, WAL, and fallback search stay below this boundary.
 - `tests/test_foundation.py`: validators, migrations, store CRUD, audit/retrieval events, auth, search, and negative sibling leak tests.
 - `tests/test_contract.py`: discovery, operation truth, object/enumeration lock, response headers, error envelope, and OpenAPI checks.
+- `tests/test_governance.py`: permission, scope, write-policy, actor delegation,
+  idempotency, concurrency-version, promotion, and denial-audit coverage.
 - `tests/test_health.py`: public health endpoint test.
 
 ## Storage and retrieval

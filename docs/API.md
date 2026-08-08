@@ -1,16 +1,12 @@
 # MemoryV4 Runtime API
 
-The locked target interface is [CONTRACT_V1.md](CONTRACT_V1.md), and the architectural boundary is [ADR-0001](ADR-0001-TIER3-BOUNDARY.md). Runtime clients must use authenticated `GET /capabilities` to distinguish `implemented`, `foundation`, and `planned` operations.
+The locked target interface is [CONTRACT_V1.md](CONTRACT_V1.md), the boundary is [ADR-0001](ADR-0001-TIER3-BOUNDARY.md), and enforced authorization rules are documented in [GOVERNANCE.md](GOVERNANCE.md). Runtime clients use `GET /capabilities` to distinguish `implemented`, `foundation`, and `planned` operations.
 
 ## Authentication
 
-All routes except `GET /health`, framework-generated `/docs`, and `/openapi.json` require:
+All application routes except `GET /health` require bearer authentication. `MEMORYV4_API_KEYS` maps tokens to structured actor, scope, and permission grants. Legacy token-to-scope values are supported with least-privileged read/search/create-working authority.
 
-```http
-Authorization: Bearer <token>
-```
-
-Foundation tokens are configured by `MEMORYV4_API_KEYS` as a JSON object mapping token to a granted `scope_path`. Action-scoped permission enforcement is locked in contract v1 but remains a subsequent governance implementation task. Foundation record routes must therefore not be treated as production-ready.
+An explicitly configured UNIFY grant may delegate the authenticated application actor using `X-MemoryV4-Actor`; ordinary grants reject that header.
 
 Every response carries:
 
@@ -19,7 +15,7 @@ X-Request-ID: req_...
 X-MemoryV4-Contract-Version: 1.0.0
 ```
 
-Handled errors use the contract v1 error envelope.
+Handled errors use the contract v1 envelope.
 
 ## GET /health
 
@@ -29,35 +25,58 @@ Public SQLite health check. It applies migrations idempotently, runs `PRAGMA qui
 {
   "status": "ok",
   "service": "memoryv4-core",
-  "version": "0.1.0-t2",
+  "version": "0.2.0-governance",
   "storage_backend": "sqlite"
 }
 ```
 
 ## GET /capabilities
 
-Authenticated, machine-readable operation inventory. Each operation reports:
-
-- `implemented`: satisfies the locked v1 contract;
-- `foundation`: route exists but does not yet satisfy every v1 governance requirement;
-- `planned`: target contract is locked but route is not implemented.
-
-It also publishes architecture ownership, governance enums, permissions, autonomous defaults, and scope semantics.
+Requires `memory.read`. Publishes operation support, architecture, governance enums, permissions, autonomous defaults, scope semantics, and mutation preconditions.
 
 ## GET /schema
 
-Authenticated, machine-readable object contract for entities, records, relations, artifacts, findings, errors, and cross-object invariants. It describes the target v1 object model without exposing SQLite details.
+Requires `memory.read`. Publishes the object contract for entities, records, relations, artifacts, findings, errors, and cross-object invariants without exposing SQLite details.
 
-## Foundation routes
+## POST /records
 
-The following routes predate the locked v1 governance contract and are reported as `foundation`:
+Governed creation with required `Idempotency-Key`.
 
-- `POST /records`
-- `GET /records`
-- `GET /records/{record_id}`
-- `GET /search`
+- `memory.create-working` may create only `active/working` candidates.
+- `memory.create` may create non-canonical live/working records.
+- Canonical/live creation additionally requires `memory.promote`.
+- Actor is derived from authentication, never from the body.
+- Default write policy is `author_only`.
 
-They provide scoped record creation/list/read and lexical retrieval with audit/retrieval events. They do not yet implement action permissions, write policy, idempotency, optimistic concurrency, canonical promotion protection, or the full unified direct-read decision. Those gaps are explicit rather than hidden by capability discovery.
+## GET /records
+
+Requires `memory.read`. Optional `scope_path` selects an effective descendant scope; `include_public` explicitly includes public records. Results use ancestor-or-equal visibility. Cursor pagination/filter completion remains a later core-object task, so capability discovery still marks this operation `foundation`.
+
+## GET /records/{record_id}
+
+Requires `memory.read` and uses the same effective-scope visibility decision as list/search. Outside or sibling objects return `404`. Full response filtering remains represented by the current capability status.
+
+## PATCH /records/{record_id}
+
+Requires `memory.edit`, `Idempotency-Key`, and integer `If-Match`. Enforces `team_editable`, `author_only`, `admin_only`, and `immutable`. Canonical records reject direct patch and must later use supersession. Successful updates increment `version` and update FTS content atomically.
+
+## POST /records/{record_id}/promote
+
+Requires `memory.promote`, `Idempotency-Key`, integer `If-Match`, and a trimmed `X-MemoryV4-Reason`. Only `active/working` candidates can be promoted. The operation atomically produces `canonical/live`, increments version, and audits its reason.
+
+## GET /search
+
+Requires `memory.search`. Uses the same effective scope as list/direct GET and emits a retrieval event. Advanced filters and pagination remain a later retrieval task, so capability discovery reports the current foundation status truthfully.
+
+## Idempotent responses
+
+Exact mutation replay returns the original object with:
+
+```http
+Idempotency-Replayed: true
+```
+
+Key reuse for a different actor request returns `409 idempotency_conflict`; stale versions return `412 version_conflict`; missing required mutation headers return `428 precondition_required`.
 
 ## Error envelope
 
@@ -65,7 +84,7 @@ They provide scoped record creation/list/read and lexical retrieval with audit/r
 {
   "error": {
     "code": "forbidden",
-    "message": "scope outside key grant",
+    "message": "scope outside actor grant",
     "status": 403,
     "request_id": "req_...",
     "details": {}
@@ -73,4 +92,4 @@ They provide scoped record creation/list/read and lexical retrieval with audit/r
 }
 ```
 
-See [CONTRACT_V1.md](CONTRACT_V1.md) for mutation headers, stable error codes, endpoint permissions, lifecycle rules, and the full required endpoint inventory.
+Denied mutations are durably audited without request content, tokens, or secrets.

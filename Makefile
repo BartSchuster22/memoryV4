@@ -17,7 +17,7 @@ qa: lint test qa10
 
 qa10:
 	@mkdir -p build
-	@printf '%s\n' '{"status":"partial","phase":"foundation","pass":0,"partial":[1,2,3,5,6,8,9,10],"not_implemented":[4,7],"message":"Foundation slice only; see docs/QA10.md for gate status."}' > build/qa10-scorecard.json
+	@printf '%s\n' '{"status":"partial","phase":"governance","pass":0,"partial":[1,2,3,5,6,7,8,9,10],"not_implemented":[4],"message":"Governance-complete record slice; full QA10 remains incomplete. See docs/QA10.md."}' > build/qa10-scorecard.json
 	@cat build/qa10-scorecard.json
 
 docker-build:

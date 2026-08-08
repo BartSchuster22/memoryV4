@@ -1,6 +1,9 @@
 # Migrations
 
-MemoryV4 migrations will be additive and reversible. Phase D0 creates the migration directory only; schema migrations begin in later implementation phases.
+MemoryV4 migrations are additive, ordered, idempotent, and reversible.
+
+- `0001_foundation`: core objects, audit/retrieval events, and FTS.
+- `0002_governance`: record `write_policy`/`version` and actor-scoped idempotency ledger.
 
 Rules:
 - every `up` must have a matching `down`
