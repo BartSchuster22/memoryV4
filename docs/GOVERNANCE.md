@@ -1,6 +1,6 @@
 # MemoryV4 Governance
 
-Governance enforcement is implemented in the core service for record creation, read/list/search, patch, and promotion. It is not delegated to UNIUI or framework clients.
+Governance enforcement is implemented in the core service for record creation, read/list/search, patch, promotion, supersession, and lifecycle transition. It is not delegated to UNIUI or framework clients.
 
 ## Authenticated grants
 
@@ -53,7 +53,7 @@ New records cannot start `superseded`, `archived`, or `expired`; lifecycle actio
 | `team_editable` | Any actor with `memory.edit`; only author/admin may change policy |
 | `author_only` | Author with `memory.edit`, or admin |
 | `admin_only` | Admin only |
-| `immutable` | No direct patch, including admin; use governed supersession later |
+| `immutable` | No direct patch, including admin; governed supersession is the revision path |
 
 Canonical records cannot be patched under any policy. Their revision path is supersession.
 
@@ -70,18 +70,24 @@ Canonical records cannot be patched under any policy. Their revision path is sup
 
 Promotion atomically changes the candidate to `canonical/live`, increments its version, and records the reason in durable audit.
 
+## Lifecycle and supersession
+
+`POST /records/{id}/transition` requires `memory.archive`, `If-Match`, idempotency, and a reason. `live` and `working` may transition to each other or to `archived`/`expired`; canonical records cannot become `working`. Archived and expired records store the exact prior nonterminal lifecycle and restore only to it. Archival sets soft-deletion metadata, while expiry remains ordinarily visible.
+
+`superseded` is terminal and can be produced only by `POST /records/{id}/supersede`. Supersession requires `memory.edit`, write-policy authority, `If-Match`, idempotency, and a reason. It atomically creates a replacement snapshot, closes the source, and links `supersedes`/`superseded_by`. Replacement role, lifecycle, scope, and actor attribution are core-owned. Database guards reject inconsistent lifecycle, deletion, and supersession state.
+
 ## Idempotency and concurrency
 
-- Record create, patch, and promotion require an idempotency key.
+- Record create, patch, promotion, supersession, and transition require an idempotency key.
 - Keys are unique per authenticated/delegated actor across mutation operations.
 - Exact replay returns the stored result with `Idempotency-Replayed: true`.
 - Reuse for a different canonical request returns `409 idempotency_conflict`.
 - SQLite `BEGIN IMMEDIATE` serializes idempotent mutation claims.
-- Patch and promotion require a strong integer `If-Match` value.
+- Patch, promotion, supersession, and transition require a strong integer `If-Match` value.
 - Stale versions return `412 version_conflict`.
 
 ## Audit
 
-Successful creates, patches, promotions, and searches emit durable audit/retrieval records. Failed mutation requests emit `request.denied` with actor, grant scope, method/path, response status, request ID, and bounded lifecycle reason when supplied.
+Successful creates, patches, promotions, supersessions, transitions, and searches emit durable audit/retrieval records. Failed mutation requests emit `request.denied` with actor, grant scope, method/path, response status, request ID, and bounded lifecycle reason when supplied.
 
 Audit records never include bearer tokens, submitted content, authorization headers, or tracebacks. Actor identity always comes from the authenticated grant or an explicitly authorized UNIFY delegation header—not a request body.

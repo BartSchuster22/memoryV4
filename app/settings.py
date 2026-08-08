@@ -33,7 +33,7 @@ class Settings:
     """Runtime settings for the private SQLite-only service."""
 
     service_name: str = "memoryv4-core"
-    version: str = "0.3.0-core-objects"
+    version: str = "0.4.0-record-lifecycle"
     storage_backend: str = "sqlite"
     database_path: Path = Path("/data/memoryv4.sqlite3")
     api_keys: dict[str, ApiKeyGrant] = field(default_factory=dict)

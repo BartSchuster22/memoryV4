@@ -25,14 +25,16 @@ Hard boundaries for this repository:
 - Enforced write policies, protected canonical creation/promotion, and unified read visibility.
 - Idempotent record create/patch/promotion with optimistic concurrency and denial audit.
 - Authenticated governed `POST /records`, `GET /records`, `GET /records/{id}`,
-  `PATCH /records/{id}`, `POST /records/{id}/promote`, and `GET /search`.
+  `PATCH /records/{id}`, `POST /records/{id}/promote`,
+  `POST /records/{id}/supersede`, `POST /records/{id}/transition`, and `GET /search`.
 - Composite-identity entity create/list/get/patch APIs.
 - Typed relation and artifact create/list APIs with scoped reference integrity.
 - Entity-linked records with tags/confidence, list/search filters, opaque cursor pagination,
   deterministic sorting, and `GET /context/{entity_type}/{id}` aggregation.
 - Governed record model with roles `canonical`, `active`, `evidence`, `exhaust` and lifecycles `live`, `working`, `superseded`, `archived`, `expired`.
 - `scope_path` tenant isolation using ancestor-or-equal visibility. Sibling tenant/user/agent/project branches are not returned.
-- SQLite migration registry with reversible foundation, governance, and core-object migrations.
+- Atomic canonical/immutable supersession plus governed archive, expiry, and exact restoration.
+- SQLite migration registry with reversible foundation, governance, core-object, and lifecycle migrations.
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.
 - Audit events for governed writes and retrieval events for search.
 - SQLite FTS5 search when available, with safe lexical fallback.

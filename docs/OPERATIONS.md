@@ -49,7 +49,8 @@ PY
 
 Expected verification output includes health JSON with `"status":"ok"`,
 `quick_check` equal to `ok`, and `0001_foundation` present in
-`schema_migrations`.
+`schema_migrations`; a current database includes `0001_foundation` through
+`0004_record_lifecycle`.
 
 Optional local Compose convenience:
 

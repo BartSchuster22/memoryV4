@@ -133,12 +133,12 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="POST", path="/records/{id}/supersede", permission=Permission.edit,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
         version_precondition_required=True, reason_required=True,
     ),
     CapabilityOperation(
         method="POST", path="/records/{id}/transition", permission=Permission.archive,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
         version_precondition_required=True, reason_required=True,
     ),
     CapabilityOperation(
@@ -236,10 +236,24 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "version": "integer>=1",
             "supersedes": "nullable record id",
             "superseded_by": "nullable record id",
+            "previous_lifecycle": "nullable live|working; exact restoration target",
+            "lifecycle_changed_at": "nullable RFC3339 UTC",
             "created_at": "RFC3339 UTC",
             "updated_at": "RFC3339 UTC",
             "deleted_at": "nullable RFC3339 UTC",
         },
+        "lifecycle_transitions": {
+            "live": ["working", "archived", "expired"],
+            "working": ["live", "archived", "expired"],
+            "archived": ["stored previous_lifecycle"],
+            "expired": ["stored previous_lifecycle"],
+            "superseded": [],
+        },
+        "lifecycle_rules": [
+            "canonical records cannot transition to working",
+            "superseded is produced only by atomic replacement supersession",
+            "archived records are soft-deleted and excluded by default",
+        ],
     },
     "relation": {
         "identity": "id prefixed rel_",
@@ -300,6 +314,8 @@ INVARIANTS = [
     "Mutations may target only equal-or-descendant scopes of the actor grant.",
     "Autonomous actors create active/working candidates and cannot promote canonical truth.",
     "Canonical revisions use supersession; canonical content is never silently overwritten.",
+    "Supersession atomically creates a replacement and closes the prior record.",
+    "Archived and expired records restore only to their stored prior live or working state.",
     "Every mutation is actor-attributed, scope-checked, idempotent, and audited.",
     "Versioned mutations use If-Match; lifecycle actions also require a reason.",
     "MemoryV3 cutover requires a separate explicit approval.",

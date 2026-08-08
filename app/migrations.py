@@ -339,10 +339,62 @@ def _down_0003(conn: sqlite3.Connection) -> None:
     )
 
 
+def _up_0004(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        ALTER TABLE records ADD COLUMN previous_lifecycle TEXT
+          CHECK(previous_lifecycle IS NULL OR previous_lifecycle IN ('live','working'));
+        ALTER TABLE records ADD COLUMN lifecycle_changed_at TEXT;
+        CREATE INDEX idx_records_supersedes ON records(supersedes);
+        CREATE INDEX idx_records_superseded_by ON records(superseded_by);
+        CREATE TRIGGER records_lifecycle_insert_guard
+        BEFORE INSERT ON records
+        WHEN (NEW.lifecycle IN ('archived','expired','superseded')
+              AND NEW.previous_lifecycle IS NULL)
+          OR (NEW.lifecycle IN ('live','working') AND NEW.previous_lifecycle IS NOT NULL)
+          OR (NEW.lifecycle = 'superseded' AND NEW.superseded_by IS NULL)
+          OR (NEW.lifecycle <> 'superseded' AND NEW.superseded_by IS NOT NULL)
+          OR (NEW.lifecycle = 'archived' AND NEW.deleted_at IS NULL)
+          OR (NEW.lifecycle <> 'archived' AND NEW.deleted_at IS NOT NULL)
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid record lifecycle state');
+        END;
+        CREATE TRIGGER records_lifecycle_update_guard
+        BEFORE UPDATE OF lifecycle, previous_lifecycle, superseded_by, deleted_at ON records
+        WHEN (NEW.lifecycle IN ('archived','expired','superseded')
+              AND NEW.previous_lifecycle IS NULL)
+          OR (NEW.lifecycle IN ('live','working') AND NEW.previous_lifecycle IS NOT NULL)
+          OR (NEW.lifecycle = 'superseded' AND NEW.superseded_by IS NULL)
+          OR (NEW.lifecycle <> 'superseded' AND NEW.superseded_by IS NOT NULL)
+          OR (NEW.lifecycle = 'archived' AND NEW.deleted_at IS NULL)
+          OR (NEW.lifecycle <> 'archived' AND NEW.deleted_at IS NOT NULL)
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid record lifecycle state');
+        END;
+        """,
+    )
+
+
+def _down_0004(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        DROP TRIGGER IF EXISTS records_lifecycle_update_guard;
+        DROP TRIGGER IF EXISTS records_lifecycle_insert_guard;
+        DROP INDEX IF EXISTS idx_records_superseded_by;
+        DROP INDEX IF EXISTS idx_records_supersedes;
+        ALTER TABLE records DROP COLUMN lifecycle_changed_at;
+        ALTER TABLE records DROP COLUMN previous_lifecycle;
+        """,
+    )
+
+
 MIGRATIONS = [
     Migration("0001_foundation", _up_0001, _down_0001),
     Migration("0002_governance", _up_0002, _down_0002),
     Migration("0003_core_objects", _up_0003, _down_0003),
+    Migration("0004_record_lifecycle", _up_0004, _down_0004),
 ]
 
 

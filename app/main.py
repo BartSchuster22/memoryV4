@@ -38,6 +38,8 @@ from app.schemas import (
     RecordCreate,
     RecordPage,
     RecordPatch,
+    RecordSupersedeRequest,
+    RecordTransitionRequest,
     Relation,
     RelationCreate,
     RelationPage,
@@ -57,7 +59,7 @@ from app.storage import (
 )
 
 APP_NAME = "memoryv4-core"
-APP_VERSION = "0.3.0-core-objects"
+APP_VERSION = "0.4.0-record-lifecycle"
 
 
 class AuthContext:
@@ -122,6 +124,12 @@ def _parse_version(value: str | None) -> int:
     return version
 
 
+def _validate_reason(value: str | None, action: str) -> str:
+    if value is None or not value.strip() or value != value.strip() or len(value) > 500:
+        raise _api_error(422, "invalid_request", f"a trimmed {action} reason is required")
+    return value
+
+
 def _request_hash(operation: str, payload: object) -> str:
     canonical = json.dumps(
         {"operation": operation, "payload": payload},
@@ -169,6 +177,17 @@ def _authorize_record_edit(record: Record, auth: AuthContext) -> None:
         raise _api_error(403, "forbidden", "record write policy requires memory.admin")
     if record.write_policy == WritePolicy.author_only and record.author_actor != auth.actor:
         raise _api_error(403, "forbidden", "record write policy permits only its author")
+
+
+def _authorize_record_supersede(record: Record, auth: AuthContext) -> None:
+    _require_permission(auth, Permission.edit)
+    if Permission.admin in auth.permissions:
+        return
+    if record.write_policy == WritePolicy.admin_only:
+        raise _api_error(403, "forbidden", "record write policy requires memory.admin")
+    if record.write_policy in {WritePolicy.author_only, WritePolicy.immutable}:
+        if record.author_actor != auth.actor:
+            raise _api_error(403, "forbidden", "record supersession permits only its author")
 
 
 def create_app() -> FastAPI:
@@ -596,6 +615,116 @@ def create_app() -> FastAPI:
         response.headers["Idempotency-Replayed"] = str(replayed).lower()
         return updated
 
+    @app.post("/records/{record_id}/supersede", tags=["records"])
+    def supersede_record(
+        record_id: str,
+        replacement: RecordSupersedeRequest,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        if_match: str | None = Header(default=None, alias="If-Match"),
+        reason: str | None = Header(default=None, alias="X-MemoryV4-Reason"),
+    ) -> Record:
+        key = _validate_idempotency_key(idempotency_key)
+        expected_version = _parse_version(if_match)
+        validated_reason = _validate_reason(reason, "supersession")
+        current = store.get_record(record_id)
+        if current is None or not ScopePath.is_descendant_or_equal(
+            current.scope_path, auth.scope_path
+        ):
+            raise _api_error(404, "not_found", "record not found")
+        _authorize_record_supersede(current, auth)
+        if (
+            replacement.write_policy is not None
+            and current.author_actor != auth.actor
+            and Permission.admin not in auth.permissions
+        ):
+            raise _api_error(
+                403,
+                "forbidden",
+                "only the author or memory.admin may change replacement write policy",
+            )
+        digest = _request_hash(
+            f"record.supersede:{record_id}",
+            {
+                "version": expected_version,
+                "reason": validated_reason,
+                "replacement": replacement.model_dump(mode="json", exclude_unset=True),
+            },
+        )
+        try:
+            superseding, replayed = store.supersede_record_idempotent(
+                record_id,
+                replacement,
+                actor=auth.actor,
+                expected_version=expected_version,
+                reason=validated_reason,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "linked entity not found in record scope") from exc
+        except RecordStateConflictError as exc:
+            raise _api_error(
+                409,
+                "conflict",
+                "only live or working records can be superseded",
+            ) from exc
+        except VersionConflictError as exc:
+            raise _api_error(412, "version_conflict", "record version does not match") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return superseding
+
+    @app.post("/records/{record_id}/transition", tags=["records"])
+    def transition_record(
+        record_id: str,
+        transition: RecordTransitionRequest,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        if_match: str | None = Header(default=None, alias="If-Match"),
+        reason: str | None = Header(default=None, alias="X-MemoryV4-Reason"),
+    ) -> Record:
+        _require_permission(auth, Permission.archive)
+        key = _validate_idempotency_key(idempotency_key)
+        expected_version = _parse_version(if_match)
+        validated_reason = _validate_reason(reason, "lifecycle transition")
+        current = store.get_record(record_id)
+        if current is None or not ScopePath.is_descendant_or_equal(
+            current.scope_path, auth.scope_path
+        ):
+            raise _api_error(404, "not_found", "record not found")
+        digest = _request_hash(
+            f"record.transition:{record_id}",
+            {
+                "version": expected_version,
+                "reason": validated_reason,
+                "lifecycle": transition.lifecycle.value,
+            },
+        )
+        try:
+            transitioned, replayed = store.transition_record_idempotent(
+                record_id,
+                transition.lifecycle,
+                actor=auth.actor,
+                expected_version=expected_version,
+                reason=validated_reason,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except RecordStateConflictError as exc:
+            raise _api_error(409, "conflict", "invalid record lifecycle transition") from exc
+        except VersionConflictError as exc:
+            raise _api_error(412, "version_conflict", "record version does not match") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return transitioned
+
     @app.post("/records/{record_id}/promote", tags=["records"])
     def promote_record(
         record_id: str,
@@ -609,8 +738,7 @@ def create_app() -> FastAPI:
         _require_permission(auth, Permission.promote)
         key = _validate_idempotency_key(idempotency_key)
         expected_version = _parse_version(if_match)
-        if reason is None or not reason.strip() or reason != reason.strip() or len(reason) > 500:
-            raise _api_error(422, "invalid_request", "a trimmed promotion reason is required")
+        validated_reason = _validate_reason(reason, "promotion")
         record = store.get_record(record_id)
         if record is None or not ScopePath.is_descendant_or_equal(
             record.scope_path, auth.scope_path
@@ -618,14 +746,14 @@ def create_app() -> FastAPI:
             raise _api_error(404, "not_found", "record not found")
         digest = _request_hash(
             f"record.promote:{record_id}",
-            {"version": expected_version, "reason": reason},
+            {"version": expected_version, "reason": validated_reason},
         )
         try:
             promoted, replayed = store.promote_record_idempotent(
                 record_id,
                 actor=auth.actor,
                 expected_version=expected_version,
-                reason=reason,
+                reason=validated_reason,
                 idempotency_key=key,
                 request_hash=digest,
             )

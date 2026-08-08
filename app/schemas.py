@@ -186,6 +186,8 @@ class Record(RecordCreate):
     updated_at: str = Field(default_factory=utc_now)
     supersedes: str | None = None
     superseded_by: str | None = None
+    previous_lifecycle: Lifecycle | None = None
+    lifecycle_changed_at: str | None = None
     deleted_at: str | None = None
     version: int = Field(default=1, ge=1)
 
@@ -220,6 +222,46 @@ class RecordPatch(BaseModel):
         if not self.model_fields_set:
             raise ValueError("at least one mutable field is required")
         return self
+
+
+class RecordSupersedeRequest(BaseModel):
+    """Mutable snapshot fields used to create a governed replacement record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    content: str | None = Field(default=None, min_length=1)
+    entity: EntityRef | None = None
+    topic: str | None = Field(default=None, max_length=240)
+    tags: list[str] | None = Field(default=None, max_length=50)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    source_refs: list[str] | None = None
+    provenance: dict[str, Any] | None = None
+    attrs: dict[str, Any] | None = None
+    write_policy: WritePolicy | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        if any(not value or value != value.strip() or len(value) > 100 for value in values):
+            raise ValueError("tags must be unique trimmed strings of at most 100 characters")
+        if len(set(values)) != len(values):
+            raise ValueError("tags must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def require_change(self) -> RecordSupersedeRequest:
+        if not self.model_fields_set:
+            raise ValueError("at least one replacement field is required")
+        return self
+
+
+class RecordTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle: Lifecycle
 
 
 class ObjectRef(BaseModel):

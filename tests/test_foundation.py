@@ -73,7 +73,9 @@ def test_migrations_are_idempotent_and_reversible(tmp_path) -> None:
     } <= tables
     with sqlite3.connect(db_path) as conn:
         record_columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
-    assert {"write_policy", "version"} <= record_columns
+    assert {
+        "write_policy", "version", "previous_lifecycle", "lifecycle_changed_at"
+    } <= record_columns
     rollback_all(db_path)
     with sqlite3.connect(db_path) as conn:
         remaining = {
@@ -121,7 +123,9 @@ def test_governance_migration_upgrades_existing_foundation_records(tmp_path) -> 
         )
 
     result = migrate(db_path)
-    assert result.applied == ["0002_governance", "0003_core_objects"]
+    assert result.applied == [
+        "0002_governance", "0003_core_objects", "0004_record_lifecycle"
+    ]
     with sqlite3.connect(db_path) as conn:
         upgraded = conn.execute(
             "SELECT write_policy, version FROM records WHERE id = 'rec_existing'"
@@ -184,7 +188,7 @@ def test_core_object_migration_preserves_foundation_graph_rows(tmp_path) -> None
             ),
         )
 
-    assert migrate(db_path).applied == ["0003_core_objects"]
+    assert migrate(db_path).applied == ["0003_core_objects", "0004_record_lifecycle"]
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         entity = conn.execute(

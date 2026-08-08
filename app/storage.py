@@ -25,6 +25,7 @@ from app.schemas import (
     Record,
     RecordCreate,
     RecordPatch,
+    RecordSupersedeRequest,
     Relation,
     RelationCreate,
     Role,
@@ -155,6 +156,17 @@ class SqliteStore:
                 rec.scope_path,
             )
         record = Record(**rec.model_dump(), author_actor=actor)
+        self._persist_record(conn, record, actor=actor, audit_create=True)
+        return record
+
+    def _persist_record(
+        self,
+        conn: sqlite3.Connection,
+        record: Record,
+        *,
+        actor: str,
+        audit_create: bool,
+    ) -> None:
         now = utc_now()
         record.created_at = now
         record.updated_at = now
@@ -163,8 +175,9 @@ class SqliteStore:
             INSERT INTO records(
               id, title, content, role, lifecycle, scope_path, entity_type, entity_id, topic,
               tags_json, confidence, source_refs_json, provenance_json, attrs_json, author_actor,
-              supersedes, superseded_by, deleted_at, created_at, updated_at, write_policy, version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              supersedes, superseded_by, previous_lifecycle, lifecycle_changed_at, deleted_at,
+              created_at, updated_at, write_policy, version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.id,
@@ -184,6 +197,8 @@ class SqliteStore:
                 actor,
                 record.supersedes,
                 record.superseded_by,
+                record.previous_lifecycle.value if record.previous_lifecycle else None,
+                record.lifecycle_changed_at,
                 record.deleted_at,
                 record.created_at,
                 record.updated_at,
@@ -197,21 +212,21 @@ class SqliteStore:
                 "VALUES ((SELECT rowid FROM records WHERE id = ?), ?, ?, ?)",
                 (record.id, record.id, record.title, record.content),
             )
-        self.write_audit(
-            conn,
-            action="record.create",
-            object_type="record",
-            object_id=record.id,
-            actor=actor,
-            scope_path=record.scope_path,
-            detail={
-                "outcome": "success",
-                "role": record.role.value,
-                "lifecycle": record.lifecycle.value,
-                "write_policy": record.write_policy.value,
-            },
-        )
-        return record
+        if audit_create:
+            self.write_audit(
+                conn,
+                action="record.create",
+                object_type="record",
+                object_id=record.id,
+                actor=actor,
+                scope_path=record.scope_path,
+                detail={
+                    "outcome": "success",
+                    "role": record.role.value,
+                    "lifecycle": record.lifecycle.value,
+                    "write_policy": record.write_policy.value,
+                },
+            )
 
     def update_record_idempotent(
         self,
@@ -357,6 +372,233 @@ class SqliteStore:
                 actor=actor,
                 scope_path=updated.scope_path,
                 detail={"outcome": "success", "reason": reason},
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=updated,
+                object_id=updated.id,
+                status_code=200,
+            )
+            return updated, False
+
+    def supersede_record_idempotent(
+        self,
+        record_id: str,
+        replacement: RecordSupersedeRequest,
+        *,
+        actor: str,
+        expected_version: int,
+        reason: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Record, bool]:
+        operation = f"record.supersede:{record_id}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Record,
+            )
+            if replay is not None:
+                return replay, True
+            row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+            if row is None:
+                raise KeyError(record_id)
+            current = self._record_from_row(row)
+            if current.version != expected_version:
+                raise VersionConflictError
+            if current.lifecycle not in {Lifecycle.live, Lifecycle.working}:
+                raise RecordStateConflictError
+
+            changes = replacement.model_dump(exclude_unset=True)
+            entity = changes.get("entity", current.entity)
+            if entity is not None:
+                if isinstance(entity, dict):
+                    entity = EntityRef.model_validate(entity)
+                self._assert_reference_visible(
+                    conn,
+                    ObjectRef(
+                        kind=ObjectKind.entity,
+                        entity_type=entity.entity_type,
+                        id=entity.id,
+                    ),
+                    current.scope_path,
+                )
+            replacement_record = Record(
+                title=changes.get("title", current.title),
+                content=changes.get("content", current.content),
+                role=current.role,
+                lifecycle=current.lifecycle,
+                write_policy=changes.get("write_policy", current.write_policy),
+                scope_path=current.scope_path,
+                entity=entity,
+                topic=changes.get("topic", current.topic),
+                tags=changes.get("tags", current.tags),
+                confidence=changes.get("confidence", current.confidence),
+                source_refs=changes.get("source_refs", current.source_refs),
+                provenance=changes.get("provenance", current.provenance),
+                attrs=changes.get("attrs", current.attrs),
+                author_actor=actor,
+                supersedes=current.id,
+            )
+            self._persist_record(
+                conn,
+                replacement_record,
+                actor=actor,
+                audit_create=False,
+            )
+            changed_at = utc_now()
+            cursor = conn.execute(
+                """
+                UPDATE records
+                SET lifecycle = 'superseded', superseded_by = ?,
+                    previous_lifecycle = ?, lifecycle_changed_at = ?, updated_at = ?,
+                    version = version + 1
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    replacement_record.id,
+                    current.lifecycle.value,
+                    changed_at,
+                    changed_at,
+                    record_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflictError
+            self.write_audit(
+                conn,
+                action="record.supersede",
+                object_type="record",
+                object_id=record_id,
+                actor=actor,
+                scope_path=current.scope_path,
+                detail={
+                    "outcome": "success",
+                    "reason": reason,
+                    "replacement_id": replacement_record.id,
+                    "from_lifecycle": current.lifecycle.value,
+                    "to_lifecycle": "superseded",
+                },
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=replacement_record,
+                object_id=replacement_record.id,
+                status_code=200,
+            )
+            return replacement_record, False
+
+    def transition_record_idempotent(
+        self,
+        record_id: str,
+        target: Lifecycle,
+        *,
+        actor: str,
+        expected_version: int,
+        reason: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Record, bool]:
+        operation = f"record.transition:{record_id}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Record,
+            )
+            if replay is not None:
+                return replay, True
+            row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+            if row is None:
+                raise KeyError(record_id)
+            current = self._record_from_row(row)
+            if current.version != expected_version:
+                raise VersionConflictError
+            if current.lifecycle == target or target == Lifecycle.superseded:
+                raise RecordStateConflictError
+            if current.lifecycle == Lifecycle.superseded:
+                raise RecordStateConflictError
+
+            nonterminal = {Lifecycle.live, Lifecycle.working}
+            terminal = {Lifecycle.archived, Lifecycle.expired}
+            restoring = current.lifecycle in terminal
+            if restoring:
+                if current.previous_lifecycle is None or target != current.previous_lifecycle:
+                    raise RecordStateConflictError
+                previous_lifecycle = None
+            elif current.lifecycle in nonterminal and target in terminal:
+                previous_lifecycle = current.lifecycle
+            elif current.lifecycle in nonterminal and target in nonterminal:
+                previous_lifecycle = None
+            else:
+                raise RecordStateConflictError
+            if current.role == Role.canonical and target == Lifecycle.working:
+                raise RecordStateConflictError
+
+            changed_at = utc_now()
+            deleted_at = changed_at if target == Lifecycle.archived else None
+            cursor = conn.execute(
+                """
+                UPDATE records
+                SET lifecycle = ?, previous_lifecycle = ?, lifecycle_changed_at = ?,
+                    deleted_at = ?, updated_at = ?, version = version + 1
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    target.value,
+                    previous_lifecycle.value if previous_lifecycle else None,
+                    changed_at,
+                    deleted_at,
+                    changed_at,
+                    record_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflictError
+            updated_row = conn.execute(
+                "SELECT * FROM records WHERE id = ?", (record_id,)
+            ).fetchone()
+            updated = self._record_from_row(updated_row)
+            if target == Lifecycle.archived:
+                action = "record.archive"
+            elif target == Lifecycle.expired:
+                action = "record.expire"
+            elif restoring:
+                action = "record.restore"
+            else:
+                action = "record.transition"
+            self.write_audit(
+                conn,
+                action=action,
+                object_type="record",
+                object_id=record_id,
+                actor=actor,
+                scope_path=current.scope_path,
+                detail={
+                    "outcome": "success",
+                    "reason": reason,
+                    "from_lifecycle": current.lifecycle.value,
+                    "to_lifecycle": target.value,
+                },
             )
             self._save_idempotency(
                 conn,
@@ -1409,6 +1651,8 @@ class SqliteStore:
             author_actor=row["author_actor"],
             supersedes=row["supersedes"],
             superseded_by=row["superseded_by"],
+            previous_lifecycle=row["previous_lifecycle"],
+            lifecycle_changed_at=row["lifecycle_changed_at"],
             deleted_at=row["deleted_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

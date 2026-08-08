@@ -22,7 +22,7 @@ UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vec
 2. **Governance is in core.** Roles, lifecycle, write policy, actor identity, action grants, scope isolation, idempotency, optimistic versions, and mutation audit are enforced below every client.
 3. **No autonomous canonical writes.** Autonomous grants create only active/working candidates; canonical creation/promotion requires `memory.promote`.
 4. **Slim boundary.** UI and orchestration belong elsewhere.
-5. **Additive migrations.** `0001_foundation`, `0002_governance`, and `0003_core_objects` have ordered up/down paths.
+5. **Additive migrations.** `0001_foundation` through `0004_record_lifecycle` have ordered up/down paths.
 6. **Scope isolation is graph-wide.** Direct/list/search/context reads use ancestor-or-equal visibility. New links require every referenced object to exist and be visible from the link scope, preventing sibling edges.
 7. **Opaque pagination state is not authority.** Cursors are bound to scope/query/filter/sort context; authorization is reevaluated on every page request.
 
@@ -36,6 +36,7 @@ UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vec
 - `app/storage.py`: SQLite Store adapter, transactions, FTS5, object integrity, pagination, and aggregation.
 - `tests/test_core_objects.py`: composite identity, object graph, pagination, filters, context, integrity, and scope tests.
 - `tests/test_governance.py`: permissions, write policy, delegation, idempotency/concurrency, promotion, and denial audit.
+- `tests/test_lifecycle.py`: transition matrix, exact restoration, atomic supersession, state integrity, concurrency, and audit.
 - `tests/test_foundation.py`, `tests/test_contract.py`, `tests/test_health.py`: migration/storage, contract, and health coverage.
 
 ## Storage and retrieval
@@ -43,6 +44,8 @@ UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vec
 SQLite is the only backend. WAL and busy-timeout settings support serialized mutation claims. Mutation objects, audit events, and idempotency responses are committed in the same transaction. Existing FTS triggers continue to synchronize record title/content updates. Search uses FTS5 and `bm25()` when available and falls back to lexical `LIKE` matching with identical scope/object filters.
 
 `0003_core_objects` rebuilds entity identity as `(entity_type,id)`, expands records with entity IDs/tags/confidence/supersession/deletion metadata, and replaces foundation relation/artifact layouts with typed references and versions. Existing rows are preserved with safe defaults.
+
+`0004_record_lifecycle` adds prior-state and lifecycle-time metadata, supersession indexes, and database guards for lifecycle/deletion/supersession consistency. Transition objects, source/replacement records, audit details, and idempotency responses commit in one `BEGIN IMMEDIATE` transaction.
 
 ## Scope model
 

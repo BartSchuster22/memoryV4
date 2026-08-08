@@ -6,7 +6,7 @@ The locked interface is [CONTRACT_V1.md](CONTRACT_V1.md), the service boundary i
 
 All routes except `GET /health` require bearer authentication. Every response includes `X-Request-ID` and `X-MemoryV4-Contract-Version: 1.0.0`. Handled failures use the v1 error envelope.
 
-Mutation routes require `Idempotency-Key`. PATCH and promotion additionally require integer `If-Match`; promotion requires `X-MemoryV4-Reason`. Exact replay returns the stored response with `Idempotency-Replayed: true`.
+Mutation routes require `Idempotency-Key`. PATCH, promotion, supersession, and lifecycle transition additionally require integer `If-Match`. Promotion, supersession, and transition require a trimmed `X-MemoryV4-Reason` of at most 500 characters. Exact replay returns the stored response with `Idempotency-Replayed: true`.
 
 List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused with a different scope, filter, sort, or query. `limit` is 1–100. Default visibility is ancestor-or-equal within the authenticated grant; siblings are excluded and `include_public=true` is explicit.
 
@@ -18,7 +18,7 @@ List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused
 | GET | `/capabilities` | `memory.read` | Runtime operation/governance support |
 | GET | `/schema` | `memory.read` | Machine-readable object contract |
 
-Healthy runtime response version is `0.3.0-core-objects`.
+Healthy runtime response version is `0.4.0-record-lifecycle`.
 
 ## Entities
 
@@ -38,6 +38,27 @@ Entity identity is the composite `(entity_type, id)`, so different types may use
 `GET /records` supports filters for role, lifecycle, entity, topic, tag, and minimum confidence, plus sorting by title, timestamps, confidence, or ID. Soft-deleted records are excluded by default; `include_deleted=true` requires `memory.archive`.
 
 `GET /records/{id}` uses the same visibility decision as list/search. `PATCH /records/{id}` enforces write policy, optimistic versioning, linked-entity integrity, and FTS synchronization. `POST /records/{id}/promote` atomically converts an active/working candidate to canonical/live and audits the reason.
+
+### Governed record lifecycle
+
+| Method | Path | Permission | Body | Result |
+|---|---|---|---|---|
+| POST | `/records/{id}/supersede` | `memory.edit` | Replacement snapshot fields | Atomically closes the source as `superseded` and returns the linked replacement |
+| POST | `/records/{id}/transition` | `memory.archive` | `{"lifecycle":"..."}` | Archives, expires, restores, or changes a non-canonical live/working state |
+
+Both operations require `Idempotency-Key`, `If-Match`, and `X-MemoryV4-Reason`.
+
+Supersession accepts at least one replacement field from `title`, `content`, `entity`, `topic`, `tags`, `confidence`, `source_refs`, `provenance`, `attrs`, or `write_policy`. Omitted fields are copied from the source. Role, lifecycle, scope, and authenticated replacement author are governed by core and cannot be supplied. The source receives `superseded_by`; the replacement receives `supersedes`. The source version increments, and the linked replacement starts at version 1. A superseded record is immutable and cannot be transitioned or superseded again.
+
+| Current | Allowed target | Additional rule |
+|---|---|---|
+| `working` | `live`, `archived`, `expired` | — |
+| `live` | `working`, `archived`, `expired` | Canonical records cannot become `working` |
+| `archived` | Stored `previous_lifecycle` only | Clears `deleted_at` on restoration |
+| `expired` | Stored `previous_lifecycle` only | Freshness restoration must be explicit |
+| `superseded` | None | Terminal history state |
+
+Archival is soft deletion: it sets `deleted_at`, remains available through `GET /records?include_deleted=true` to callers with `memory.archive`, and is excluded from ordinary list/get/search/context reads. Expiry preserves ordinary visibility but records the prior lifecycle. Restoring either state returns exactly to the stored prior `live` or `working` state. No-op transitions and direct transition to `superseded` return `409`.
 
 ## Relations
 
