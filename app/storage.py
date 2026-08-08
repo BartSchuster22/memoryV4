@@ -5,10 +5,36 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from app.migrations import migrate
-from app.schemas import Record, RecordCreate, RecordPatch, ScopePath, SearchResult, utc_now
+from app.pagination import decode_cursor, encode_cursor
+from app.schemas import (
+    Artifact,
+    ArtifactCreate,
+    Entity,
+    EntityContext,
+    EntityCreate,
+    EntityPatch,
+    EntityRef,
+    Lifecycle,
+    ObjectKind,
+    ObjectRef,
+    Record,
+    RecordCreate,
+    RecordPatch,
+    Relation,
+    RelationCreate,
+    Role,
+    ScopePath,
+    SearchResult,
+    SortOrder,
+    utc_now,
+)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class IdempotencyConflictError(Exception):
@@ -20,6 +46,10 @@ class VersionConflictError(Exception):
 
 
 class RecordStateConflictError(Exception):
+    pass
+
+
+class ObjectConflictError(Exception):
     pass
 
 
@@ -96,6 +126,7 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
+                model=Record,
             )
             if replay is not None:
                 return replay, True
@@ -106,12 +137,23 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
-                record=record,
+                result=record,
+                object_id=record.id,
                 status_code=201,
             )
             return record, False
 
     def _insert_record(self, conn: sqlite3.Connection, rec: RecordCreate, *, actor: str) -> Record:
+        if rec.entity is not None:
+            self._assert_reference_visible(
+                conn,
+                ObjectRef(
+                    kind=ObjectKind.entity,
+                    entity_type=rec.entity.entity_type,
+                    id=rec.entity.id,
+                ),
+                rec.scope_path,
+            )
         record = Record(**rec.model_dump(), author_actor=actor)
         now = utc_now()
         record.created_at = now
@@ -119,10 +161,10 @@ class SqliteStore:
         conn.execute(
             """
             INSERT INTO records(
-              id, title, content, role, lifecycle, scope_path, entity_type, topic,
-              source_refs_json, provenance_json, attrs_json, author_actor,
-              superseded_by, created_at, updated_at, write_policy, version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, title, content, role, lifecycle, scope_path, entity_type, entity_id, topic,
+              tags_json, confidence, source_refs_json, provenance_json, attrs_json, author_actor,
+              supersedes, superseded_by, deleted_at, created_at, updated_at, write_policy, version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.id,
@@ -131,13 +173,18 @@ class SqliteStore:
                 record.role.value,
                 record.lifecycle.value,
                 record.scope_path,
-                record.entity_type,
+                record.entity.entity_type if record.entity else None,
+                record.entity.id if record.entity else None,
                 record.topic,
+                json.dumps(record.tags, sort_keys=True),
+                record.confidence,
                 json.dumps(record.source_refs, sort_keys=True),
                 json.dumps(record.provenance, sort_keys=True),
                 json.dumps(record.attrs, sort_keys=True),
                 actor,
+                record.supersedes,
                 record.superseded_by,
+                record.deleted_at,
                 record.created_at,
                 record.updated_at,
                 record.write_policy.value,
@@ -185,6 +232,7 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
+                model=Record,
             )
             if replay is not None:
                 return replay, True
@@ -196,7 +244,21 @@ class SqliteStore:
                 raise VersionConflictError
 
             changes = patch.model_dump(exclude_unset=True)
-            for field in ("source_refs", "provenance", "attrs"):
+            if "entity" in changes:
+                entity = changes.pop("entity")
+                if entity is not None:
+                    self._assert_reference_visible(
+                        conn,
+                        ObjectRef(
+                            kind=ObjectKind.entity,
+                            entity_type=entity["entity_type"],
+                            id=entity["id"],
+                        ),
+                        current.scope_path,
+                    )
+                changes["entity_type"] = entity["entity_type"] if entity else None
+                changes["entity_id"] = entity["id"] if entity else None
+            for field in ("tags", "source_refs", "provenance", "attrs"):
                 if field in changes:
                     changes[f"{field}_json"] = json.dumps(changes.pop(field), sort_keys=True)
             if "write_policy" in changes:
@@ -236,7 +298,8 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
-                record=updated,
+                result=updated,
+                object_id=updated.id,
                 status_code=200,
             )
             return updated, False
@@ -260,6 +323,7 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
+                model=Record,
             )
             if replay is not None:
                 return replay, True
@@ -300,7 +364,8 @@ class SqliteStore:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
-                record=updated,
+                result=updated,
+                object_id=updated.id,
                 status_code=200,
             )
             return updated, False
@@ -313,7 +378,8 @@ class SqliteStore:
         operation: str,
         idempotency_key: str,
         request_hash: str,
-    ) -> Record | None:
+        model: type[ModelT],
+    ) -> ModelT | None:
         row = conn.execute(
             "SELECT * FROM idempotency_requests WHERE actor = ? AND idempotency_key = ?",
             (actor, idempotency_key),
@@ -322,7 +388,7 @@ class SqliteStore:
             return None
         if row["operation"] != operation or row["request_hash"] != request_hash:
             raise IdempotencyConflictError
-        return Record.model_validate_json(row["response_json"])
+        return model.model_validate_json(row["response_json"])
 
     def _save_idempotency(
         self,
@@ -332,7 +398,8 @@ class SqliteStore:
         operation: str,
         idempotency_key: str,
         request_hash: str,
-        record: Record,
+        result: BaseModel,
+        object_id: str,
         status_code: int,
     ) -> None:
         conn.execute(
@@ -347,9 +414,9 @@ class SqliteStore:
                 operation,
                 idempotency_key,
                 request_hash,
-                record.model_dump_json(),
+                result.model_dump_json(),
                 status_code,
-                record.id,
+                object_id,
                 utc_now(),
             ),
         )
@@ -370,7 +437,8 @@ class SqliteStore:
         placeholders = ",".join("?" for _ in scopes)
         with self._connect() as conn:
             row = conn.execute(
-                f"SELECT * FROM records WHERE id = ? AND scope_path IN ({placeholders})",
+                f"SELECT * FROM records WHERE id = ? AND deleted_at IS NULL "
+                f"AND scope_path IN ({placeholders})",
                 [record_id, *scopes],
             ).fetchone()
         return self._record_from_row(row) if row else None
@@ -381,7 +449,7 @@ class SqliteStore:
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT * FROM records WHERE scope_path IN ({placeholders}) "
-                "ORDER BY created_at, id",
+                "AND deleted_at IS NULL ORDER BY created_at, id",
                 scopes,
             ).fetchall()
         return [self._record_from_row(row) for row in rows]
@@ -413,9 +481,37 @@ class SqliteStore:
         ]
 
     def _search_rows(
-        self, conn: sqlite3.Connection, *, query: str, scopes: list[str], limit: int
+        self,
+        conn: sqlite3.Connection,
+        *,
+        query: str,
+        scopes: list[str],
+        limit: int,
+        offset: int = 0,
+        role: Role | None = None,
+        lifecycle: Lifecycle | None = None,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        tag: str | None = None,
     ) -> list[sqlite3.Row]:
         placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"records.scope_path IN ({placeholders})", "records.deleted_at IS NULL"]
+        filter_values: list[object] = list(scopes)
+        for column, value in (
+            ("role", role.value if role else None),
+            ("lifecycle", lifecycle.value if lifecycle else None),
+            ("entity_type", entity_type),
+            ("entity_id", entity_id),
+        ):
+            if value is not None:
+                clauses.append(f"records.{column} = ?")
+                filter_values.append(value)
+        if tag is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(records.tags_json) WHERE value = ?)"
+            )
+            filter_values.append(tag)
+        filters = " AND ".join(clauses)
         if self._has_fts(conn):
             try:
                 return conn.execute(
@@ -423,24 +519,779 @@ class SqliteStore:
                     SELECT records.*
                     FROM records_fts
                     JOIN records ON records.rowid = records_fts.rowid
-                    WHERE records_fts MATCH ? AND records.scope_path IN ({placeholders})
+                    WHERE records_fts MATCH ? AND {filters}
                     ORDER BY bm25(records_fts), records.updated_at DESC
-                    LIMIT ?
+                    LIMIT ? OFFSET ?
                     """,
-                    [query, *scopes, limit],
+                    [query, *filter_values, limit, offset],
                 ).fetchall()
             except sqlite3.OperationalError:
                 pass
         like = f"%{query}%"
         return conn.execute(
             f"""
-            SELECT * FROM records
-            WHERE scope_path IN ({placeholders}) AND (title LIKE ? OR content LIKE ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
+            SELECT records.* FROM records
+            WHERE {filters} AND (records.title LIKE ? OR records.content LIKE ?)
+            ORDER BY records.updated_at DESC
+            LIMIT ? OFFSET ?
             """,
-            [*scopes, like, like, limit],
+            [*filter_values, like, like, limit, offset],
         ).fetchall()
+
+    def search_records_page(
+        self,
+        query: str,
+        *,
+        scope_path: str,
+        actor: str,
+        include_public: bool,
+        role: Role | None,
+        lifecycle: Lifecycle | None,
+        entity_type: str | None,
+        entity_id: str | None,
+        tag: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[SearchResult], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "search",
+            "q": query,
+            "scope": scope_path,
+            "public": include_public,
+            "role": role.value if role else None,
+            "lifecycle": lifecycle.value if lifecycle else None,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "tag": tag,
+        }
+        offset = decode_cursor(cursor, context=context)
+        with self._connect() as conn:
+            rows = self._search_rows(
+                conn,
+                query=query,
+                scopes=scopes,
+                limit=limit + 1,
+                offset=offset,
+                role=role,
+                lifecycle=lifecycle,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                tag=tag,
+            )
+            page_rows = rows[:limit]
+            records = [self._record_from_row(row) for row in page_rows]
+            self.write_retrieval(
+                conn,
+                query=query,
+                scope_path=scope_path,
+                actor=actor,
+                result_count=len(records),
+                degraded=not self._has_fts(conn),
+            )
+        results = [
+            SearchResult(record=record, score=float(offset + len(records) - index))
+            for index, record in enumerate(records)
+        ]
+        next_cursor = (
+            encode_cursor(offset=offset + limit, context=context) if len(rows) > limit else None
+        )
+        return results, next_cursor
+
+    def create_entity_idempotent(
+        self,
+        entity: EntityCreate,
+        *,
+        actor: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Entity, bool]:
+        operation = "entity.create"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Entity,
+            )
+            if replay is not None:
+                return replay, True
+            created = Entity(**entity.model_dump())
+            now = utc_now()
+            created.created_at = created.updated_at = now
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO entities(
+                      id, entity_type, name, scope_path, attrs_json, version,
+                      created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        created.id,
+                        created.entity_type,
+                        created.name,
+                        created.scope_path,
+                        json.dumps(created.attrs, sort_keys=True),
+                        created.version,
+                        created.created_at,
+                        created.updated_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ObjectConflictError from exc
+            self.write_audit(
+                conn,
+                action="entity.create",
+                object_type="entity",
+                object_id=f"{created.entity_type}:{created.id}",
+                actor=actor,
+                scope_path=created.scope_path,
+                detail={"outcome": "success"},
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=created,
+                object_id=f"{created.entity_type}:{created.id}",
+                status_code=201,
+            )
+            return created, False
+
+    def get_entity(self, entity_type: str, entity_id: str) -> Entity | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM entities WHERE entity_type = ? AND id = ?",
+                (entity_type, entity_id),
+            ).fetchone()
+        return self._entity_from_row(row) if row else None
+
+    def get_visible_entity(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        scope_path: str,
+        include_public: bool = False,
+    ) -> Entity | None:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        placeholders = ",".join("?" for _ in scopes)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM entities
+                WHERE entity_type = ? AND id = ? AND scope_path IN ({placeholders})
+                """,
+                [entity_type, entity_id, *scopes],
+            ).fetchone()
+        return self._entity_from_row(row) if row else None
+
+    def update_entity_idempotent(
+        self,
+        entity_type: str,
+        entity_id: str,
+        patch: EntityPatch,
+        *,
+        actor: str,
+        expected_version: int,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Entity, bool]:
+        operation = f"entity.patch:{entity_type}:{entity_id}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Entity,
+            )
+            if replay is not None:
+                return replay, True
+            row = conn.execute(
+                "SELECT * FROM entities WHERE entity_type = ? AND id = ?",
+                (entity_type, entity_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(entity_id)
+            current = self._entity_from_row(row)
+            if current.version != expected_version:
+                raise VersionConflictError
+            changes = patch.model_dump(exclude_unset=True)
+            if "attrs" in changes:
+                changes["attrs_json"] = json.dumps(changes.pop("attrs"), sort_keys=True)
+            changes["updated_at"] = utc_now()
+            changes["version"] = current.version + 1
+            assignments = ", ".join(f"{field} = ?" for field in changes)
+            cursor = conn.execute(
+                f"""
+                UPDATE entities SET {assignments}
+                WHERE entity_type = ? AND id = ? AND version = ?
+                """,
+                [*changes.values(), entity_type, entity_id, expected_version],
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflictError
+            updated_row = conn.execute(
+                "SELECT * FROM entities WHERE entity_type = ? AND id = ?",
+                (entity_type, entity_id),
+            ).fetchone()
+            updated = self._entity_from_row(updated_row)
+            self.write_audit(
+                conn,
+                action="entity.patch",
+                object_type="entity",
+                object_id=f"{entity_type}:{entity_id}",
+                actor=actor,
+                scope_path=updated.scope_path,
+                detail={"outcome": "success", "fields": sorted(patch.model_fields_set)},
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=updated,
+                object_id=f"{entity_type}:{entity_id}",
+                status_code=200,
+            )
+            return updated, False
+
+    def page_entities(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        entity_type: str | None,
+        name_contains: str | None,
+        sort: str,
+        order: SortOrder,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[Entity], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "entities",
+            "scope": scope_path,
+            "public": include_public,
+            "entity_type": entity_type,
+            "name": name_contains,
+            "sort": sort,
+            "order": order.value,
+        }
+        offset = decode_cursor(cursor, context=context)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            values.append(entity_type)
+        if name_contains is not None:
+            clauses.append("name LIKE ?")
+            values.append(f"%{name_contains}%")
+        sort_column = {
+            "name": "name",
+            "created_at": "created_at",
+            "updated_at": "updated_at",
+            "id": "id",
+        }[sort]
+        direction = "ASC" if order == SortOrder.asc else "DESC"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM entities WHERE {' AND '.join(clauses)}
+                ORDER BY {sort_column} {direction}, entity_type {direction}, id {direction}
+                LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._entity_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=context) if has_more else None
+        return items, next_cursor
+
+    def create_relation_idempotent(
+        self,
+        relation: RelationCreate,
+        *,
+        actor: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Relation, bool]:
+        operation = "relation.create"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Relation,
+            )
+            if replay is not None:
+                return replay, True
+            self._assert_reference_visible(conn, relation.from_ref, relation.scope_path)
+            self._assert_reference_visible(conn, relation.to_ref, relation.scope_path)
+            created = Relation(**relation.model_dump(by_alias=False), author_actor=actor)
+            now = utc_now()
+            created.created_at = created.updated_at = now
+            conn.execute(
+                """
+                INSERT INTO relations(
+                  id, from_kind, from_entity_type, from_id, to_kind, to_entity_type,
+                  to_id, relation_type, scope_path, provenance_json, author_actor,
+                  version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created.id,
+                    created.from_ref.kind.value,
+                    created.from_ref.entity_type,
+                    created.from_ref.id,
+                    created.to_ref.kind.value,
+                    created.to_ref.entity_type,
+                    created.to_ref.id,
+                    created.relation_type,
+                    created.scope_path,
+                    json.dumps(created.provenance, sort_keys=True),
+                    actor,
+                    created.version,
+                    created.created_at,
+                    created.updated_at,
+                ),
+            )
+            self.write_audit(
+                conn,
+                action="relation.create",
+                object_type="relation",
+                object_id=created.id,
+                actor=actor,
+                scope_path=created.scope_path,
+                detail={"outcome": "success", "relation_type": created.relation_type},
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=created,
+                object_id=created.id,
+                status_code=201,
+            )
+            return created, False
+
+    def page_relations(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        relation_type: str | None,
+        from_kind: ObjectKind | None,
+        from_id: str | None,
+        to_kind: ObjectKind | None,
+        to_id: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[Relation], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "relations",
+            "scope": scope_path,
+            "public": include_public,
+            "type": relation_type,
+            "from_kind": from_kind.value if from_kind else None,
+            "from_id": from_id,
+            "to_kind": to_kind.value if to_kind else None,
+            "to_id": to_id,
+        }
+        offset = decode_cursor(cursor, context=context)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        for column, value in (
+            ("relation_type", relation_type),
+            ("from_kind", from_kind.value if from_kind else None),
+            ("from_id", from_id),
+            ("to_kind", to_kind.value if to_kind else None),
+            ("to_id", to_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM relations WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._relation_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=context) if has_more else None
+        return items, next_cursor
+
+    def create_artifact_idempotent(
+        self,
+        artifact: ArtifactCreate,
+        *,
+        actor: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Artifact, bool]:
+        operation = "artifact.create"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Artifact,
+            )
+            if replay is not None:
+                return replay, True
+            if artifact.record_id is not None:
+                self._assert_reference_visible(
+                    conn,
+                    ObjectRef(kind=ObjectKind.record, id=artifact.record_id),
+                    artifact.scope_path,
+                )
+            if artifact.entity is not None:
+                self._assert_reference_visible(
+                    conn,
+                    ObjectRef(
+                        kind=ObjectKind.entity,
+                        entity_type=artifact.entity.entity_type,
+                        id=artifact.entity.id,
+                    ),
+                    artifact.scope_path,
+                )
+            created = Artifact(**artifact.model_dump(), author_actor=actor)
+            now = utc_now()
+            created.created_at = created.updated_at = now
+            conn.execute(
+                """
+                INSERT INTO artifacts(
+                  id, record_id, entity_type, entity_id, artifact_type, uri, checksum,
+                  scope_path, provenance_json, author_actor, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created.id,
+                    created.record_id,
+                    created.entity.entity_type if created.entity else None,
+                    created.entity.id if created.entity else None,
+                    created.artifact_type,
+                    created.uri,
+                    created.checksum,
+                    created.scope_path,
+                    json.dumps(created.provenance, sort_keys=True),
+                    actor,
+                    created.version,
+                    created.created_at,
+                    created.updated_at,
+                ),
+            )
+            self.write_audit(
+                conn,
+                action="artifact.create",
+                object_type="artifact",
+                object_id=created.id,
+                actor=actor,
+                scope_path=created.scope_path,
+                detail={"outcome": "success", "artifact_type": created.artifact_type},
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=created,
+                object_id=created.id,
+                status_code=201,
+            )
+            return created, False
+
+    def page_artifacts(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        artifact_type: str | None,
+        record_id: str | None,
+        entity_type: str | None,
+        entity_id: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[Artifact], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "artifacts",
+            "scope": scope_path,
+            "public": include_public,
+            "type": artifact_type,
+            "record": record_id,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        }
+        offset = decode_cursor(cursor, context=context)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        for column, value in (
+            ("artifact_type", artifact_type),
+            ("record_id", record_id),
+            ("entity_type", entity_type),
+            ("entity_id", entity_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM artifacts WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._artifact_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=context) if has_more else None
+        return items, next_cursor
+
+    def page_records(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        role: Role | None,
+        lifecycle: Lifecycle | None,
+        entity_type: str | None,
+        entity_id: str | None,
+        topic: str | None,
+        tag: str | None,
+        min_confidence: float | None,
+        include_deleted: bool,
+        sort: str,
+        order: SortOrder,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[Record], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "records",
+            "scope": scope_path,
+            "public": include_public,
+            "role": role.value if role else None,
+            "lifecycle": lifecycle.value if lifecycle else None,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "topic": topic,
+            "tag": tag,
+            "confidence": min_confidence,
+            "deleted": include_deleted,
+            "sort": sort,
+            "order": order.value,
+        }
+        offset = decode_cursor(cursor, context=context)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+        for column, value in (
+            ("role", role.value if role else None),
+            ("lifecycle", lifecycle.value if lifecycle else None),
+            ("entity_type", entity_type),
+            ("entity_id", entity_id),
+            ("topic", topic),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        if tag is not None:
+            clauses.append("EXISTS (SELECT 1 FROM json_each(records.tags_json) WHERE value = ?)")
+            values.append(tag)
+        if min_confidence is not None:
+            clauses.append("confidence >= ?")
+            values.append(min_confidence)
+        sort_column = {
+            "title": "title",
+            "created_at": "created_at",
+            "updated_at": "updated_at",
+            "confidence": "confidence",
+            "id": "id",
+        }[sort]
+        direction = "ASC" if order == SortOrder.asc else "DESC"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM records WHERE {' AND '.join(clauses)}
+                ORDER BY {sort_column} {direction}, id {direction}
+                LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._record_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=context) if has_more else None
+        return items, next_cursor
+
+    def get_entity_context(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        scope_path: str,
+        include_public: bool,
+        limit: int,
+    ) -> EntityContext | None:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        placeholders = ",".join("?" for _ in scopes)
+        with self._connect() as conn:
+            entity_row = conn.execute(
+                f"""
+                SELECT * FROM entities WHERE entity_type = ? AND id = ?
+                AND scope_path IN ({placeholders})
+                """,
+                [entity_type, entity_id, *scopes],
+            ).fetchone()
+            if entity_row is None:
+                return None
+            record_rows = conn.execute(
+                f"""
+                SELECT * FROM records WHERE entity_type = ? AND entity_id = ?
+                AND deleted_at IS NULL AND scope_path IN ({placeholders})
+                ORDER BY updated_at DESC, id DESC LIMIT ?
+                """,
+                [entity_type, entity_id, *scopes, limit + 1],
+            ).fetchall()
+            relation_rows = conn.execute(
+                f"""
+                SELECT * FROM relations WHERE scope_path IN ({placeholders}) AND (
+                  (from_kind = 'entity' AND from_entity_type = ? AND from_id = ?) OR
+                  (to_kind = 'entity' AND to_entity_type = ? AND to_id = ?)
+                ) ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                [*scopes, entity_type, entity_id, entity_type, entity_id, limit + 1],
+            ).fetchall()
+            record_ids = [row["id"] for row in record_rows[:limit]]
+            artifact_clauses = ["(entity_type = ? AND entity_id = ?)"]
+            artifact_values: list[object] = [entity_type, entity_id]
+            if record_ids:
+                record_placeholders = ",".join("?" for _ in record_ids)
+                artifact_clauses.append(f"record_id IN ({record_placeholders})")
+                artifact_values.extend(record_ids)
+            artifact_rows = conn.execute(
+                f"""
+                SELECT * FROM artifacts WHERE scope_path IN ({placeholders})
+                AND ({' OR '.join(artifact_clauses)})
+                ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                [*scopes, *artifact_values, limit + 1],
+            ).fetchall()
+        truncated = any(len(rows) > limit for rows in (record_rows, relation_rows, artifact_rows))
+        return EntityContext(
+            entity=self._entity_from_row(entity_row),
+            records=[self._record_from_row(row) for row in record_rows[:limit]],
+            relations=[self._relation_from_row(row) for row in relation_rows[:limit]],
+            artifacts=[self._artifact_from_row(row) for row in artifact_rows[:limit]],
+            truncated=truncated,
+        )
+
+    def reference_visible(self, ref: ObjectRef, *, scope_path: str) -> bool:
+        with self._connect() as conn:
+            try:
+                self._assert_reference_visible(conn, ref, scope_path)
+            except KeyError:
+                return False
+        return True
+
+    def _assert_reference_visible(
+        self, conn: sqlite3.Connection, ref: ObjectRef, scope_path: str
+    ) -> None:
+        if ref.kind == ObjectKind.entity:
+            row = conn.execute(
+                "SELECT scope_path FROM entities WHERE entity_type = ? AND id = ?",
+                (ref.entity_type, ref.id),
+            ).fetchone()
+        elif ref.kind == ObjectKind.record:
+            row = conn.execute(
+                "SELECT scope_path FROM records WHERE id = ? AND deleted_at IS NULL", (ref.id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT scope_path FROM artifacts WHERE id = ?", (ref.id,)
+            ).fetchone()
+        if row is None or row["scope_path"] not in ScopePath.ancestors(scope_path):
+            raise KeyError(ref.id)
+
+    def _entity_from_row(self, row: sqlite3.Row) -> Entity:
+        return Entity(
+            id=row["id"],
+            entity_type=row["entity_type"],
+            name=row["name"],
+            scope_path=row["scope_path"],
+            attrs=json.loads(row["attrs_json"]),
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _relation_from_row(self, row: sqlite3.Row) -> Relation:
+        return Relation(
+            id=row["id"],
+            from_ref=ObjectRef(
+                kind=row["from_kind"],
+                entity_type=row["from_entity_type"],
+                id=row["from_id"],
+            ),
+            to_ref=ObjectRef(
+                kind=row["to_kind"], entity_type=row["to_entity_type"], id=row["to_id"]
+            ),
+            relation_type=row["relation_type"],
+            scope_path=row["scope_path"],
+            provenance=json.loads(row["provenance_json"]),
+            author_actor=row["author_actor"],
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _artifact_from_row(self, row: sqlite3.Row) -> Artifact:
+        return Artifact(
+            id=row["id"],
+            record_id=row["record_id"],
+            entity=(
+                EntityRef(entity_type=row["entity_type"], id=row["entity_id"])
+                if row["entity_type"] is not None and row["entity_id"] is not None
+                else None
+            ),
+            artifact_type=row["artifact_type"],
+            uri=row["uri"],
+            checksum=row["checksum"],
+            scope_path=row["scope_path"],
+            provenance=json.loads(row["provenance_json"]),
+            author_actor=row["author_actor"],
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def write_audit(
         self,
@@ -544,13 +1395,21 @@ class SqliteStore:
             lifecycle=row["lifecycle"],
             write_policy=row["write_policy"],
             scope_path=row["scope_path"],
-            entity_type=row["entity_type"],
+            entity=(
+                EntityRef(entity_type=row["entity_type"], id=row["entity_id"])
+                if row["entity_type"] is not None and row["entity_id"] is not None
+                else None
+            ),
             topic=row["topic"],
+            tags=json.loads(row["tags_json"]),
+            confidence=row["confidence"],
             source_refs=json.loads(row["source_refs_json"]),
             provenance=json.loads(row["provenance_json"]),
             attrs=json.loads(row["attrs_json"]),
             author_actor=row["author_actor"],
+            supersedes=row["supersedes"],
             superseded_by=row["superseded_by"],
+            deleted_at=row["deleted_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             version=row["version"],

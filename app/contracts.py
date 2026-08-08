@@ -99,24 +99,24 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="GET", path="/entities", permission=Permission.read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="POST", path="/entities", permission=Permission.create,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/entities/{type}/{id}", permission=Permission.read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="PATCH", path="/entities/{type}/{id}", permission=Permission.edit,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
         version_precondition_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/records", permission=Permission.read,
-        status=OperationStatus.foundation,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="POST", path="/records", permission=Permission.create,
@@ -124,7 +124,7 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="GET", path="/records/{id}", permission=Permission.read,
-        status=OperationStatus.foundation,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="PATCH", path="/records/{id}", permission=Permission.edit,
@@ -148,27 +148,27 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="GET", path="/relations", permission=Permission.read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="POST", path="/relations", permission=Permission.create,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/artifacts", permission=Permission.read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="POST", path="/artifacts", permission=Permission.create,
-        status=OperationStatus.planned, mutation=True, idempotency_required=True,
+        status=OperationStatus.implemented, mutation=True, idempotency_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/search", permission=Permission.search,
-        status=OperationStatus.foundation,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="GET", path="/context/{entity_type}/{entity_id}",
-        permission=Permission.read, status=OperationStatus.planned,
+        permission=Permission.read, status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="GET", path="/review/findings", permission=Permission.review,
@@ -252,6 +252,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "provenance": "object",
             "author_actor": "derived authenticated actor",
             "version": "integer>=1",
+            "created_at": "RFC3339 UTC",
+            "updated_at": "RFC3339 UTC",
         },
     },
     "artifact": {
@@ -267,6 +269,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "provenance": "object",
             "author_actor": "derived authenticated actor",
             "version": "integer>=1",
+            "created_at": "RFC3339 UTC",
+            "updated_at": "RFC3339 UTC",
         },
     },
     "finding": {

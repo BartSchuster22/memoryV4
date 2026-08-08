@@ -1,6 +1,6 @@
 # MemoryV4 Core
 
-MemoryV4 is a slim FastAPI memory core foundation. This slice implements a governed SQLite-only service with scoped authenticated record/retrieval routes, additive migrations, audit/retrieval event tables, and tests for the isolation boundary.
+MemoryV4 is a slim FastAPI memory core. This slice implements a governed SQLite-only entity/record/relation/artifact graph, scoped retrieval and context APIs, additive migrations, and durable audit/retrieval events.
 
 The architecture and v1 contract are now locked:
 
@@ -14,9 +14,9 @@ Hard boundaries for this repository:
 - no MemoryV3 cutover or live-memory mutation
 - no UI/explorer or Kanban/orchestration code in core
 - SQLite-only implementation now; Postgres is a future Store adapter slot only
-- no autonomous process writes canonical memory; the current foundation write route is not production-ready until v1 action permissions enforce this boundary
+- no autonomous process writes canonical memory; v1 action permissions enforce this boundary in core
 
-## Implemented foundation
+## Implemented core-object slice
 
 - Public `GET /health`.
 - Authenticated `GET /capabilities` and `GET /schema` contract discovery.
@@ -26,9 +26,13 @@ Hard boundaries for this repository:
 - Idempotent record create/patch/promotion with optimistic concurrency and denial audit.
 - Authenticated governed `POST /records`, `GET /records`, `GET /records/{id}`,
   `PATCH /records/{id}`, `POST /records/{id}/promote`, and `GET /search`.
+- Composite-identity entity create/list/get/patch APIs.
+- Typed relation and artifact create/list APIs with scoped reference integrity.
+- Entity-linked records with tags/confidence, list/search filters, opaque cursor pagination,
+  deterministic sorting, and `GET /context/{entity_type}/{id}` aggregation.
 - Governed record model with roles `canonical`, `active`, `evidence`, `exhaust` and lifecycles `live`, `working`, `superseded`, `archived`, `expired`.
 - `scope_path` tenant isolation using ancestor-or-equal visibility. Sibling tenant/user/agent/project branches are not returned.
-- SQLite migration registry with reversible foundation and governance migrations.
+- SQLite migration registry with reversible foundation, governance, and core-object migrations.
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.
 - Audit events for governed writes and retrieval events for search.
 - SQLite FTS5 search when available, with safe lexical fallback.

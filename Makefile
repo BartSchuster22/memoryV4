@@ -17,7 +17,7 @@ qa: lint test qa10
 
 qa10:
 	@mkdir -p build
-	@printf '%s\n' '{"status":"partial","phase":"governance","pass":0,"partial":[1,2,3,5,6,7,8,9,10],"not_implemented":[4],"message":"Governance-complete record slice; full QA10 remains incomplete. See docs/QA10.md."}' > build/qa10-scorecard.json
+	@printf '%s\n' '{"status":"partial","phase":"core-objects","pass":0,"partial":[1,2,3,5,6,7,8,9,10],"not_implemented":[4],"message":"Core-object graph complete; full QA10 remains incomplete. See docs/QA10.md."}' > build/qa10-scorecard.json
 	@cat build/qa10-scorecard.json
 
 docker-build:

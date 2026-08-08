@@ -169,9 +169,180 @@ def _down_0002(conn: sqlite3.Connection) -> None:
     )
 
 
+def _up_0003(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        ALTER TABLE entities RENAME TO entities_foundation;
+        CREATE TABLE entities (
+          id TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          attrs_json TEXT NOT NULL DEFAULT '{}',
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(entity_type, id)
+        );
+        INSERT INTO entities(
+          id, entity_type, name, scope_path, attrs_json, version, created_at, updated_at
+        )
+        SELECT id, entity_type, name, scope_path, attrs_json, 1, created_at, updated_at
+        FROM entities_foundation;
+        DROP TABLE entities_foundation;
+        CREATE INDEX idx_entities_scope ON entities(scope_path);
+        CREATE INDEX idx_entities_type ON entities(entity_type);
+        CREATE INDEX idx_entities_name ON entities(name);
+
+        ALTER TABLE records ADD COLUMN entity_id TEXT;
+        ALTER TABLE records ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE records ADD COLUMN confidence REAL CHECK(
+          confidence IS NULL OR (confidence >= 0 AND confidence <= 1)
+        );
+        ALTER TABLE records ADD COLUMN supersedes TEXT REFERENCES records(id);
+        ALTER TABLE records ADD COLUMN deleted_at TEXT;
+        CREATE INDEX idx_records_entity ON records(entity_type, entity_id);
+        CREATE INDEX idx_records_updated ON records(updated_at, id);
+
+        ALTER TABLE relations RENAME TO relations_foundation;
+        CREATE TABLE relations (
+          id TEXT PRIMARY KEY,
+          from_kind TEXT NOT NULL CHECK(from_kind IN ('entity','record','artifact')),
+          from_entity_type TEXT,
+          from_id TEXT NOT NULL,
+          to_kind TEXT NOT NULL CHECK(to_kind IN ('entity','record','artifact')),
+          to_entity_type TEXT,
+          to_id TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          provenance_json TEXT NOT NULL DEFAULT '{}',
+          author_actor TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO relations(
+          id, from_kind, from_id, to_kind, to_id, relation_type, scope_path,
+          provenance_json, author_actor, version, created_at, updated_at
+        )
+        SELECT id, 'record', from_id, 'record', to_id, relation_type, scope_path,
+               provenance_json, author_actor, 1, created_at, created_at
+        FROM relations_foundation;
+        DROP TABLE relations_foundation;
+        CREATE INDEX idx_relations_scope ON relations(scope_path);
+        CREATE INDEX idx_relations_from ON relations(from_kind, from_entity_type, from_id);
+        CREATE INDEX idx_relations_to ON relations(to_kind, to_entity_type, to_id);
+        CREATE INDEX idx_relations_type ON relations(relation_type);
+
+        ALTER TABLE artifacts RENAME TO artifacts_foundation;
+        CREATE TABLE artifacts (
+          id TEXT PRIMARY KEY,
+          record_id TEXT REFERENCES records(id),
+          entity_type TEXT,
+          entity_id TEXT,
+          artifact_type TEXT NOT NULL,
+          uri TEXT NOT NULL,
+          checksum TEXT,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          provenance_json TEXT NOT NULL DEFAULT '{}',
+          author_actor TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO artifacts(
+          id, record_id, artifact_type, uri, checksum, scope_path, provenance_json,
+          author_actor, version, created_at, updated_at
+        )
+        SELECT id, record_id, artifact_type, uri, checksum, scope_path, provenance_json,
+               author_actor, 1, created_at, created_at
+        FROM artifacts_foundation;
+        DROP TABLE artifacts_foundation;
+        CREATE INDEX idx_artifacts_scope ON artifacts(scope_path);
+        CREATE INDEX idx_artifacts_record ON artifacts(record_id);
+        CREATE INDEX idx_artifacts_entity ON artifacts(entity_type, entity_id);
+        CREATE INDEX idx_artifacts_type ON artifacts(artifact_type);
+        """,
+    )
+
+
+def _down_0003(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        ALTER TABLE artifacts RENAME TO artifacts_core;
+        CREATE TABLE artifacts (
+          id TEXT PRIMARY KEY,
+          record_id TEXT REFERENCES records(id),
+          artifact_type TEXT NOT NULL,
+          uri TEXT NOT NULL,
+          checksum TEXT,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          provenance_json TEXT NOT NULL DEFAULT '{}',
+          author_actor TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO artifacts
+        SELECT id, record_id, artifact_type, uri, checksum, scope_path,
+               provenance_json, author_actor, created_at
+        FROM artifacts_core;
+        DROP TABLE artifacts_core;
+        CREATE INDEX idx_artifacts_scope ON artifacts(scope_path);
+
+        ALTER TABLE relations RENAME TO relations_core;
+        CREATE TABLE relations (
+          id TEXT PRIMARY KEY,
+          from_id TEXT NOT NULL,
+          to_id TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          provenance_json TEXT NOT NULL DEFAULT '{}',
+          author_actor TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO relations
+        SELECT id, from_id, to_id, relation_type, scope_path,
+               provenance_json, author_actor, created_at
+        FROM relations_core;
+        DROP TABLE relations_core;
+        CREATE INDEX idx_relations_scope ON relations(scope_path);
+
+        DROP INDEX IF EXISTS idx_records_entity;
+        DROP INDEX IF EXISTS idx_records_updated;
+        ALTER TABLE records DROP COLUMN deleted_at;
+        ALTER TABLE records DROP COLUMN supersedes;
+        ALTER TABLE records DROP COLUMN confidence;
+        ALTER TABLE records DROP COLUMN tags_json;
+        ALTER TABLE records DROP COLUMN entity_id;
+
+        ALTER TABLE entities RENAME TO entities_core;
+        CREATE TABLE entities (
+          id TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          scope_path TEXT NOT NULL DEFAULT 'global',
+          attrs_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO entities(id, entity_type, name, scope_path, attrs_json, created_at, updated_at)
+        SELECT CASE
+                 WHEN count(*) OVER (PARTITION BY id) > 1 THEN entity_type || ':' || id
+                 ELSE id
+               END,
+               entity_type, name, scope_path, attrs_json, created_at, updated_at
+        FROM entities_core;
+        DROP TABLE entities_core;
+        CREATE INDEX idx_entities_scope ON entities(scope_path);
+        """,
+    )
+
+
 MIGRATIONS = [
     Migration("0001_foundation", _up_0001, _down_0001),
     Migration("0002_governance", _up_0002, _down_0002),
+    Migration("0003_core_objects", _up_0003, _down_0003),
 ]
 
 

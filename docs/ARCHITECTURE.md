@@ -1,46 +1,55 @@
 # MemoryV4 Architecture
 
-The Tier-3 ownership and deployment boundary is locked by
-[ADR-0001](ADR-0001-TIER3-BOUNDARY.md). The target object/API/error contract is
-[MemoryV4 Contract v1](CONTRACT_V1.md). This document describes the currently
-implemented foundation slice.
+The Tier-3 ownership/deployment boundary is locked by [ADR-0001](ADR-0001-TIER3-BOUNDARY.md); [Contract v1](CONTRACT_V1.md) defines the stable object/API/error surface.
 
-## Foundation slice
+## Core-object slice
 
-MemoryV4 core is a slim FastAPI service around a governed memory object model and a SQLite-only store adapter. UI/explorer surfaces, Kanban/orchestration, distillation workers, health workers, vector embeddings, Postgres, and cutover logic are outside this repository slice unless added in a later reviewed phase.
+MemoryV4 core is a slim FastAPI service around one governed object graph and a SQLite-only Store adapter. The implemented graph contains:
+
+- composite-identity entities;
+- governed records linked to entities;
+- typed relations between entities, records, and artifacts;
+- artifacts linked to records/entities;
+- FTS-backed record retrieval;
+- entity-context aggregation;
+- audit and retrieval events.
+
+UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vector embeddings, Postgres, and MemoryV3 cutover logic remain outside this slice.
 
 ## Non-negotiables
 
-1. One object model. Fact/Scene/Persona/Decision concepts are represented as governed records and relations, not parallel fact stores.
-2. Governance is the moat. The foundation validates roles `canonical`, `active`, `evidence`, `exhaust`; lifecycles `live`, `working`, `superseded`, `archived`, `expired`; source/provenance fields; author metadata; audit events; retrieval events; and scoped keys.
-3. No autonomous process writes canonical. Contract v1 requires autonomous workers to create `active/working` candidates and reserves canonical creation/promotion for `memory.promote`. The current record write route is explicitly reported as `foundation` until that permission is enforced.
-4. Slim boundary. Memory core only. UI/explorer and orchestration belong elsewhere.
-5. Additive migrations. The current `0001_foundation` migration has a reversible down path and is idempotent on rerun.
-6. Scope isolation is a safety property. Queries return records whose `scope_path` is an ancestor-or-equal of the requested scope. Sibling branches are excluded.
+1. **One object model.** Fact/Scene/Persona/Decision concepts are records and relations, not parallel stores.
+2. **Governance is in core.** Roles, lifecycle, write policy, actor identity, action grants, scope isolation, idempotency, optimistic versions, and mutation audit are enforced below every client.
+3. **No autonomous canonical writes.** Autonomous grants create only active/working candidates; canonical creation/promotion requires `memory.promote`.
+4. **Slim boundary.** UI and orchestration belong elsewhere.
+5. **Additive migrations.** `0001_foundation`, `0002_governance`, and `0003_core_objects` have ordered up/down paths.
+6. **Scope isolation is graph-wide.** Direct/list/search/context reads use ancestor-or-equal visibility. New links require every referenced object to exist and be visible from the link scope, preventing sibling edges.
+7. **Opaque pagination state is not authority.** Cursors are bound to scope/query/filter/sort context; authorization is reevaluated on every page request.
 
 ## Package layout
 
-- `app/main.py`: FastAPI app factory, health/discovery routes, authenticated foundation record/search routes, scope-aware authz, and the v1 error envelope.
-- `app/contracts.py`: machine-readable contract version, permissions, write policies, operation support, object contracts, and invariants.
-- `app/schemas.py`: Pydantic governed object model, role/lifecycle enums, scope helper.
+- `app/main.py`: FastAPI factory, governed object routes, discovery, error middleware, and authorization.
+- `app/contracts.py`: machine-readable contract, permissions, operation status, schemas, and invariants.
+- `app/schemas.py`: Pydantic object graph, validators, page envelopes, and context response.
+- `app/pagination.py`: opaque context-bound cursor codec.
 - `app/migrations.py`: additive SQLite migration registry and rollback helper.
-- `app/storage.py`: `Store` protocol and `SqliteStore` adapter. SQL, FTS5, WAL, and fallback search stay below this boundary.
-- `tests/test_foundation.py`: validators, migrations, store CRUD, audit/retrieval events, auth, search, and negative sibling leak tests.
-- `tests/test_contract.py`: discovery, operation truth, object/enumeration lock, response headers, error envelope, and OpenAPI checks.
-- `tests/test_governance.py`: permission, scope, write-policy, actor delegation,
-  idempotency, concurrency-version, promotion, and denial-audit coverage.
-- `tests/test_health.py`: public health endpoint test.
+- `app/storage.py`: SQLite Store adapter, transactions, FTS5, object integrity, pagination, and aggregation.
+- `tests/test_core_objects.py`: composite identity, object graph, pagination, filters, context, integrity, and scope tests.
+- `tests/test_governance.py`: permissions, write policy, delegation, idempotency/concurrency, promotion, and denial audit.
+- `tests/test_foundation.py`, `tests/test_contract.py`, `tests/test_health.py`: migration/storage, contract, and health coverage.
 
 ## Storage and retrieval
 
-SQLite is the only implemented backend. `SqliteStore` initializes the migration registry, creates the governed foundation tables, writes audit events inside governed write transactions, and records search/retrieval events. Search uses SQLite FTS5 and `bm25()` when available; minimal SQLite builds fall back to `LIKE` matching with the same scope filter applied.
+SQLite is the only backend. WAL and busy-timeout settings support serialized mutation claims. Mutation objects, audit events, and idempotency responses are committed in the same transaction. Existing FTS triggers continue to synchronize record title/content updates. Search uses FTS5 and `bm25()` when available and falls back to lexical `LIKE` matching with identical scope/object filters.
+
+`0003_core_objects` rebuilds entity identity as `(entity_type,id)`, expands records with entity IDs/tags/confidence/supersession/deletion metadata, and replaces foundation relation/artifact layouts with typed references and versions. Existing rows are preserved with safe defaults.
 
 ## Scope model
 
-`scope_path` is a slash-separated owning path such as:
+A scope such as:
 
 ```text
 org:acme/project:psi/agent:alice/user:u123/session:s001
 ```
 
-A request at that scope can see `global`, `org:acme`, `org:acme/project:psi`, `org:acme/project:psi/agent:alice`, and so on through its exact requested scope. It cannot see sibling tenants/projects/agents/users. The reserved `public` scope exists in helpers only and is included only when a caller opts in with `include_public=true`; no automatic public promotion is implemented.
+can see `global` and each ancestor through its exact effective scope. It cannot see sibling tenants, projects, agents, users, or sessions. `public` is included only when explicitly requested with `include_public=true`. Requested effective scopes must remain within the bearer grant.

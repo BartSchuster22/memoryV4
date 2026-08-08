@@ -22,10 +22,34 @@ from app.contracts import (
     capabilities,
     schema_contract,
 )
-from app.schemas import Lifecycle, Record, RecordCreate, RecordPatch, Role, ScopePath, SearchResult
+from app.pagination import CursorError
+from app.schemas import (
+    Artifact,
+    ArtifactCreate,
+    ArtifactPage,
+    Entity,
+    EntityContext,
+    EntityCreate,
+    EntityPage,
+    EntityPatch,
+    Lifecycle,
+    ObjectKind,
+    Record,
+    RecordCreate,
+    RecordPage,
+    RecordPatch,
+    Relation,
+    RelationCreate,
+    RelationPage,
+    Role,
+    ScopePath,
+    SearchPage,
+    SortOrder,
+)
 from app.settings import ApiKeyGrant, load_settings
 from app.storage import (
     IdempotencyConflictError,
+    ObjectConflictError,
     RecordStateConflictError,
     SqliteStore,
     VersionConflictError,
@@ -33,7 +57,7 @@ from app.storage import (
 )
 
 APP_NAME = "memoryv4-core"
-APP_VERSION = "0.2.0-governance"
+APP_VERSION = "0.3.0-core-objects"
 
 
 class AuthContext:
@@ -297,6 +321,128 @@ def create_app() -> FastAPI:
         _require_permission(auth, Permission.read)
         return schema_contract()
 
+    @app.post("/entities", status_code=status.HTTP_201_CREATED, tags=["entities"])
+    def create_entity(
+        entity: EntityCreate,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> Entity:
+        _require_permission(auth, Permission.create)
+        _authorize_effective_scope(entity.scope_path, auth)
+        key = _validate_idempotency_key(idempotency_key)
+        digest = _request_hash("entity.create", entity.model_dump(mode="json"))
+        try:
+            created, replayed = store.create_entity_idempotent(
+                entity,
+                actor=auth.actor,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except ObjectConflictError as exc:
+            raise _api_error(409, "conflict", "entity identity already exists") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return created
+
+    @app.get("/entities", response_model=EntityPage, tags=["entities"])
+    def list_entities(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        entity_type: str | None = Query(None),
+        name_contains: str | None = Query(None, min_length=1, max_length=240),
+        sort: str = Query("updated_at", pattern="^(name|created_at|updated_at|id)$"),
+        order: SortOrder = Query(SortOrder.desc),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> EntityPage:
+        _require_permission(auth, Permission.read)
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        try:
+            entities, next_cursor = store.page_entities(
+                scope_path=effective_scope,
+                include_public=include_public,
+                entity_type=entity_type,
+                name_contains=name_contains,
+                sort=sort,
+                order=order,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return EntityPage(entities=entities, next_cursor=next_cursor)
+
+    @app.get("/entities/{entity_type}/{entity_id}", tags=["entities"])
+    def get_entity(
+        entity_type: str,
+        entity_id: str,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+    ) -> Entity:
+        _require_permission(auth, Permission.read)
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        entity = store.get_visible_entity(
+            entity_type,
+            entity_id,
+            scope_path=effective_scope,
+            include_public=include_public,
+        )
+        if entity is None:
+            raise _api_error(404, "not_found", "entity not found")
+        return entity
+
+    @app.patch("/entities/{entity_type}/{entity_id}", tags=["entities"])
+    def patch_entity(
+        entity_type: str,
+        entity_id: str,
+        patch: EntityPatch,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        if_match: str | None = Header(default=None, alias="If-Match"),
+    ) -> Entity:
+        _require_permission(auth, Permission.edit)
+        key = _validate_idempotency_key(idempotency_key)
+        expected_version = _parse_version(if_match)
+        current = store.get_entity(entity_type, entity_id)
+        if current is None or not ScopePath.is_descendant_or_equal(
+            current.scope_path, auth.scope_path
+        ):
+            raise _api_error(404, "not_found", "entity not found")
+        digest = _request_hash(
+            f"entity.patch:{entity_type}:{entity_id}",
+            {
+                "version": expected_version,
+                "patch": patch.model_dump(mode="json", exclude_unset=True),
+            },
+        )
+        try:
+            updated, replayed = store.update_entity_idempotent(
+                entity_type,
+                entity_id,
+                patch,
+                actor=auth.actor,
+                expected_version=expected_version,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except VersionConflictError as exc:
+            raise _api_error(412, "version_conflict", "entity version does not match") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return updated
+
     @app.post("/records", status_code=status.HTTP_201_CREATED, tags=["records"])
     def create_record(
         record: RecordCreate,
@@ -321,25 +467,61 @@ def create_app() -> FastAPI:
                 "idempotency_conflict",
                 "Idempotency-Key was already used for a different request",
             ) from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "linked entity not found in record scope") from exc
         response.headers["Idempotency-Replayed"] = str(replayed).lower()
         return created
 
-    @app.get("/records", tags=["records"])
+    @app.get("/records", response_model=RecordPage, tags=["records"])
     def list_records(
         auth: AuthContext = Depends(require_auth),
         store: SqliteStore = Depends(get_store),
         scope_path: str | None = Query(None),
         include_public: bool = Query(False),
-    ) -> dict[str, list[Record]]:
+        role: Role | None = Query(None),
+        lifecycle: Lifecycle | None = Query(None),
+        entity_type: str | None = Query(None),
+        entity_id: str | None = Query(None),
+        topic: str | None = Query(None),
+        tag: str | None = Query(None),
+        min_confidence: float | None = Query(None, ge=0, le=1),
+        include_deleted: bool = Query(False),
+        sort: str = Query(
+            "updated_at", pattern="^(title|created_at|updated_at|confidence|id)$"
+        ),
+        order: SortOrder = Query(SortOrder.desc),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> RecordPage:
         _require_permission(auth, Permission.read)
+        if include_deleted:
+            _require_permission(auth, Permission.archive)
+        if (entity_type is None) != (entity_id is None):
+            raise _api_error(
+                422, "invalid_request", "entity_type and entity_id must be supplied together"
+            )
         effective_scope = ScopePath.validate(scope_path or auth.scope_path)
         _authorize_effective_scope(effective_scope, auth)
-        return {
-            "records": store.list_records(
+        try:
+            records, next_cursor = store.page_records(
                 scope_path=effective_scope,
                 include_public=include_public,
+                role=role,
+                lifecycle=lifecycle,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                topic=topic,
+                tag=tag,
+                min_confidence=min_confidence,
+                include_deleted=include_deleted,
+                sort=sort,
+                order=order,
+                limit=limit,
+                cursor=cursor,
             )
-        }
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return RecordPage(records=records, next_cursor=next_cursor)
 
     @app.get("/records/{record_id}", tags=["records"])
     def get_record(
@@ -407,6 +589,8 @@ def create_app() -> FastAPI:
             )
         except IdempotencyConflictError as exc:
             raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "linked entity not found in record scope") from exc
         except VersionConflictError as exc:
             raise _api_error(412, "version_conflict", "record version does not match") from exc
         response.headers["Idempotency-Replayed"] = str(replayed).lower()
@@ -458,26 +642,195 @@ def create_app() -> FastAPI:
         response.headers["Idempotency-Replayed"] = str(replayed).lower()
         return promoted
 
-    @app.get("/search", tags=["retrieval"])
-    def search(
+    @app.post("/relations", status_code=status.HTTP_201_CREATED, tags=["relations"])
+    def create_relation(
+        relation: RelationCreate,
+        response: Response,
         auth: AuthContext = Depends(require_auth),
         store: SqliteStore = Depends(get_store),
-        q: str = Query(min_length=1),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> Relation:
+        _require_permission(auth, Permission.create)
+        _authorize_effective_scope(relation.scope_path, auth)
+        key = _validate_idempotency_key(idempotency_key)
+        digest = _request_hash(
+            "relation.create", relation.model_dump(mode="json", by_alias=True)
+        )
+        try:
+            created, replayed = store.create_relation_idempotent(
+                relation,
+                actor=auth.actor,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "relation endpoint not found in scope") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return created
+
+    @app.get("/relations", response_model=RelationPage, tags=["relations"])
+    def list_relations(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
         scope_path: str | None = Query(None),
         include_public: bool = Query(False),
-        limit: int = Query(25, ge=1, le=100),
-    ) -> dict[str, list[SearchResult]]:
-        _require_permission(auth, Permission.search)
+        relation_type: str | None = Query(None),
+        from_kind: ObjectKind | None = Query(None),
+        from_id: str | None = Query(None),
+        to_kind: ObjectKind | None = Query(None),
+        to_id: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> RelationPage:
+        _require_permission(auth, Permission.read)
         effective_scope = ScopePath.validate(scope_path or auth.scope_path)
         _authorize_effective_scope(effective_scope, auth)
-        results = store.search_records(
-            q,
+        try:
+            relations, next_cursor = store.page_relations(
+                scope_path=effective_scope,
+                include_public=include_public,
+                relation_type=relation_type,
+                from_kind=from_kind,
+                from_id=from_id,
+                to_kind=to_kind,
+                to_id=to_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return RelationPage(relations=relations, next_cursor=next_cursor)
+
+    @app.post("/artifacts", status_code=status.HTTP_201_CREATED, tags=["artifacts"])
+    def create_artifact(
+        artifact: ArtifactCreate,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> Artifact:
+        _require_permission(auth, Permission.create)
+        _authorize_effective_scope(artifact.scope_path, auth)
+        key = _validate_idempotency_key(idempotency_key)
+        digest = _request_hash("artifact.create", artifact.model_dump(mode="json"))
+        try:
+            created, replayed = store.create_artifact_idempotent(
+                artifact,
+                actor=auth.actor,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "artifact target not found in scope") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return created
+
+    @app.get("/artifacts", response_model=ArtifactPage, tags=["artifacts"])
+    def list_artifacts(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        artifact_type: str | None = Query(None),
+        record_id: str | None = Query(None),
+        entity_type: str | None = Query(None),
+        entity_id: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> ArtifactPage:
+        _require_permission(auth, Permission.read)
+        if (entity_type is None) != (entity_id is None):
+            raise _api_error(
+                422, "invalid_request", "entity_type and entity_id must be supplied together"
+            )
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        try:
+            artifacts, next_cursor = store.page_artifacts(
+                scope_path=effective_scope,
+                include_public=include_public,
+                artifact_type=artifact_type,
+                record_id=record_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return ArtifactPage(artifacts=artifacts, next_cursor=next_cursor)
+
+    @app.get(
+        "/context/{entity_type}/{entity_id}",
+        response_model=EntityContext,
+        tags=["context"],
+    )
+    def get_context(
+        entity_type: str,
+        entity_id: str,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        limit: int = Query(50, ge=1, le=100),
+    ) -> EntityContext:
+        _require_permission(auth, Permission.read)
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        context = store.get_entity_context(
+            entity_type,
+            entity_id,
             scope_path=effective_scope,
-            actor=auth.actor,
             include_public=include_public,
             limit=limit,
         )
-        return {"results": results}
+        if context is None:
+            raise _api_error(404, "not_found", "entity not found")
+        return context
+
+    @app.get("/search", response_model=SearchPage, tags=["retrieval"])
+    def search(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        q: str = Query(min_length=1, max_length=500),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        role: Role | None = Query(None),
+        lifecycle: Lifecycle | None = Query(None),
+        entity_type: str | None = Query(None),
+        entity_id: str | None = Query(None),
+        tag: str | None = Query(None),
+        limit: int = Query(25, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> SearchPage:
+        _require_permission(auth, Permission.search)
+        if (entity_type is None) != (entity_id is None):
+            raise _api_error(
+                422, "invalid_request", "entity_type and entity_id must be supplied together"
+            )
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        try:
+            results, next_cursor = store.search_records_page(
+                q,
+                scope_path=effective_scope,
+                actor=auth.actor,
+                include_public=include_public,
+                role=role,
+                lifecycle=lifecycle,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                tag=tag,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return SearchPage(results=results, next_cursor=next_cursor)
 
     return app
 

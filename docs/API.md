@@ -1,84 +1,69 @@
 # MemoryV4 Runtime API
 
-The locked target interface is [CONTRACT_V1.md](CONTRACT_V1.md), the boundary is [ADR-0001](ADR-0001-TIER3-BOUNDARY.md), and enforced authorization rules are documented in [GOVERNANCE.md](GOVERNANCE.md). Runtime clients use `GET /capabilities` to distinguish `implemented`, `foundation`, and `planned` operations.
+The locked interface is [CONTRACT_V1.md](CONTRACT_V1.md), the service boundary is [ADR-0001](ADR-0001-TIER3-BOUNDARY.md), and authorization rules are in [GOVERNANCE.md](GOVERNANCE.md). `GET /capabilities` is the runtime source for implemented versus planned operations.
 
-## Authentication
+## Common behavior
 
-All application routes except `GET /health` require bearer authentication. `MEMORYV4_API_KEYS` maps tokens to structured actor, scope, and permission grants. Legacy token-to-scope values are supported with least-privileged read/search/create-working authority.
+All routes except `GET /health` require bearer authentication. Every response includes `X-Request-ID` and `X-MemoryV4-Contract-Version: 1.0.0`. Handled failures use the v1 error envelope.
 
-An explicitly configured UNIFY grant may delegate the authenticated application actor using `X-MemoryV4-Actor`; ordinary grants reject that header.
+Mutation routes require `Idempotency-Key`. PATCH and promotion additionally require integer `If-Match`; promotion requires `X-MemoryV4-Reason`. Exact replay returns the stored response with `Idempotency-Replayed: true`.
 
-Every response carries:
+List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused with a different scope, filter, sort, or query. `limit` is 1–100. Default visibility is ancestor-or-equal within the authenticated grant; siblings are excluded and `include_public=true` is explicit.
 
-```http
-X-Request-ID: req_...
-X-MemoryV4-Contract-Version: 1.0.0
-```
+## Discovery and health
 
-Handled errors use the contract v1 envelope.
+| Method | Path | Permission | Purpose |
+|---|---|---|---|
+| GET | `/health` | public | SQLite quick-check and migration health |
+| GET | `/capabilities` | `memory.read` | Runtime operation/governance support |
+| GET | `/schema` | `memory.read` | Machine-readable object contract |
 
-## GET /health
+Healthy runtime response version is `0.3.0-core-objects`.
 
-Public SQLite health check. It applies migrations idempotently, runs `PRAGMA quick_check`, and reports `degraded` when integrity is not OK.
+## Entities
 
-```json
-{
-  "status": "ok",
-  "service": "memoryv4-core",
-  "version": "0.2.0-governance",
-  "storage_backend": "sqlite"
-}
-```
+Entity identity is the composite `(entity_type, id)`, so different types may use the same `id`.
 
-## GET /capabilities
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/entities` | `memory.create` | Idempotent create; identity conflicts return `409` |
+| GET | `/entities` | `memory.read` | Filters: `entity_type`, `name_contains`; sorting: `name`, `created_at`, `updated_at`, `id` |
+| GET | `/entities/{entity_type}/{id}` | `memory.read` | Governed direct read; hidden objects return `404` |
+| PATCH | `/entities/{entity_type}/{id}` | `memory.edit` | Mutable `name` and `attrs`; versioned/idempotent |
 
-Requires `memory.read`. Publishes operation support, architecture, governance enums, permissions, autonomous defaults, scope semantics, and mutation preconditions.
+## Records
 
-## GET /schema
+`POST /records` enforces action grants and canonical restrictions. An optional `entity: {entity_type,id}` must exist and be visible from the record scope. Records support tags and confidence in addition to provenance/source metadata.
 
-Requires `memory.read`. Publishes the object contract for entities, records, relations, artifacts, findings, errors, and cross-object invariants without exposing SQLite details.
+`GET /records` supports filters for role, lifecycle, entity, topic, tag, and minimum confidence, plus sorting by title, timestamps, confidence, or ID. Soft-deleted records are excluded by default; `include_deleted=true` requires `memory.archive`.
 
-## POST /records
+`GET /records/{id}` uses the same visibility decision as list/search. `PATCH /records/{id}` enforces write policy, optimistic versioning, linked-entity integrity, and FTS synchronization. `POST /records/{id}/promote` atomically converts an active/working candidate to canonical/live and audits the reason.
 
-Governed creation with required `Idempotency-Key`.
+## Relations
 
-- `memory.create-working` may create only `active/working` candidates.
-- `memory.create` may create non-canonical live/working records.
-- Canonical/live creation additionally requires `memory.promote`.
-- Actor is derived from authentication, never from the body.
-- Default write policy is `author_only`.
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/relations` | `memory.create` | Idempotent create using typed `from` and `to` object references |
+| GET | `/relations` | `memory.read` | Filters by relation type and endpoint kind/ID; cursor paginated |
 
-## GET /records
+Reference kinds are `entity`, `record`, and `artifact`. Entity references require `entity_type`; other references reject it. Both endpoints must exist and be visible from the relation scope, preventing cross-sibling edges.
 
-Requires `memory.read`. Optional `scope_path` selects an effective descendant scope; `include_public` explicitly includes public records. Results use ancestor-or-equal visibility. Cursor pagination/filter completion remains a later core-object task, so capability discovery still marks this operation `foundation`.
+## Artifacts
 
-## GET /records/{record_id}
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/artifacts` | `memory.create` | Idempotent create linked to a record, entity, or both |
+| GET | `/artifacts` | `memory.read` | Filters by type, record, or composite entity identity |
 
-Requires `memory.read` and uses the same effective-scope visibility decision as list/search. Outside or sibling objects return `404`. Full response filtering remains represented by the current capability status.
+Artifact targets must exist and be visible from the artifact scope. Checksums use `algorithm:digest` form.
 
-## PATCH /records/{record_id}
+## Search and entity context
 
-Requires `memory.edit`, `Idempotency-Key`, and integer `If-Match`. Enforces `team_editable`, `author_only`, `admin_only`, and `immutable`. Canonical records reject direct patch and must later use supersession. Successful updates increment `version` and update FTS content atomically.
+`GET /search` requires `memory.search`, emits a retrieval event, and supports role, lifecycle, entity, and tag filters plus filter-bound cursor pagination. SQLite FTS5/BM25 is used when available; lexical fallback keeps the same governance filters.
 
-## POST /records/{record_id}/promote
+`GET /context/{entity_type}/{id}` requires `memory.read` and aggregates the visible entity with linked records, direct relations, and artifacts. `limit` applies per collection and `truncated` reports whether any collection exceeded it.
 
-Requires `memory.promote`, `Idempotency-Key`, integer `If-Match`, and a trimmed `X-MemoryV4-Reason`. Only `active/working` candidates can be promoted. The operation atomically produces `canonical/live`, increments version, and audits its reason.
-
-## GET /search
-
-Requires `memory.search`. Uses the same effective scope as list/direct GET and emits a retrieval event. Advanced filters and pagination remain a later retrieval task, so capability discovery reports the current foundation status truthfully.
-
-## Idempotent responses
-
-Exact mutation replay returns the original object with:
-
-```http
-Idempotency-Replayed: true
-```
-
-Key reuse for a different actor request returns `409 idempotency_conflict`; stale versions return `412 version_conflict`; missing required mutation headers return `428 precondition_required`.
-
-## Error envelope
+## Errors
 
 ```json
 {
@@ -92,4 +77,4 @@ Key reuse for a different actor request returns `409 idempotency_conflict`; stal
 }
 ```
 
-Denied mutations are durably audited without request content, tokens, or secrets.
+Notable statuses: `409 idempotency_conflict`, `412 version_conflict`, `422 invalid_request`, and `428 precondition_required`. Denied mutations are audited without request content, tokens, or authorization headers.

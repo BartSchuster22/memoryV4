@@ -121,12 +121,87 @@ def test_governance_migration_upgrades_existing_foundation_records(tmp_path) -> 
         )
 
     result = migrate(db_path)
-    assert result.applied == ["0002_governance"]
+    assert result.applied == ["0002_governance", "0003_core_objects"]
     with sqlite3.connect(db_path) as conn:
         upgraded = conn.execute(
             "SELECT write_policy, version FROM records WHERE id = 'rec_existing'"
         ).fetchone()
     assert upgraded == ("author_only", 1)
+
+
+def test_core_object_migration_preserves_foundation_graph_rows(tmp_path) -> None:
+    db_path = tmp_path / "core-upgrade.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        MIGRATIONS[0].up(conn)
+        MIGRATIONS[1].up(conn)
+        conn.execute(
+            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            [
+                ("0001_foundation", "2026-08-08T00:00:00+00:00"),
+                ("0002_governance", "2026-08-08T00:00:01+00:00"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO entities VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-entity",
+                "Folder",
+                "Legacy",
+                "org:a",
+                "{}",
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO relations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "rel_legacy",
+                "rec_a",
+                "rec_b",
+                "supports",
+                "org:a",
+                "{}",
+                "user:legacy",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "art_legacy",
+                None,
+                "document",
+                "s3://legacy/file",
+                "sha256:abc",
+                "org:a",
+                "{}",
+                "user:legacy",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+
+    assert migrate(db_path).applied == ["0003_core_objects"]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        entity = conn.execute(
+            "SELECT * FROM entities WHERE entity_type='Folder' AND id='legacy-entity'"
+        ).fetchone()
+        relation = conn.execute("SELECT * FROM relations WHERE id='rel_legacy'").fetchone()
+        artifact = conn.execute("SELECT * FROM artifacts WHERE id='art_legacy'").fetchone()
+        record_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()
+        }
+    assert entity["version"] == 1
+    assert relation["from_kind"] == "record"
+    assert relation["to_kind"] == "record"
+    assert relation["version"] == 1
+    assert artifact["record_id"] is None
+    assert artifact["version"] == 1
+    assert {"entity_id", "tags_json", "confidence", "supersedes", "deleted_at"} <= record_columns
 
 
 def test_store_crud_audit_search_and_scope_isolation(tmp_path) -> None:
