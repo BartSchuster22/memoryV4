@@ -50,7 +50,7 @@ PY
 Expected verification output includes health JSON with `"status":"ok"`,
 `quick_check` equal to `ok`, and `0001_foundation` present in
 `schema_migrations`; a current database includes `0001_foundation` through
-`0004_record_lifecycle`.
+`0005_review_audit_operations`.
 
 Optional local Compose convenience:
 
@@ -76,6 +76,12 @@ workers, or frontend services.
 ## Auth and scope operations
 
 All non-health routes require bearer auth. A token grant is a scope subtree. For example, a token granted `org:a/project:p` can read and write `org:a/project:p` and descendants, but cannot request `org:b`, `org:a/project:other`, or `global` directly. Read/search results are filtered to ancestor-or-equal records under the requested scope.
+
+Operational access is split deliberately: `memory.review` reads/closes findings,
+`memory.audit.read` queries audit and retrieval events, and `memory.admin` queries
+`/usage`. Use timezone-aware `from_time`/`to_time` for incident and usage windows.
+Workers write findings through the Store seam; no worker sidecar or public
+finding-create endpoint is part of this deployment.
 
 ## Backup and artifacts
 

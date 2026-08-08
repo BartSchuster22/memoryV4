@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from hmac import compare_digest
 from uuid import uuid4
 
@@ -27,11 +28,17 @@ from app.schemas import (
     Artifact,
     ArtifactCreate,
     ArtifactPage,
+    AuditEventPage,
     Entity,
     EntityContext,
     EntityCreate,
     EntityPage,
     EntityPatch,
+    Finding,
+    FindingPage,
+    FindingResolutionRequest,
+    FindingStatus,
+    FindingType,
     Lifecycle,
     ObjectKind,
     Record,
@@ -43,10 +50,12 @@ from app.schemas import (
     Relation,
     RelationCreate,
     RelationPage,
+    RetrievalEventPage,
     Role,
     ScopePath,
     SearchPage,
     SortOrder,
+    UsageResponse,
 )
 from app.settings import ApiKeyGrant, load_settings
 from app.storage import (
@@ -59,7 +68,7 @@ from app.storage import (
 )
 
 APP_NAME = "memoryv4-core"
-APP_VERSION = "0.4.0-record-lifecycle"
+APP_VERSION = "0.5.0-review-audit-operations"
 
 
 class AuthContext:
@@ -69,7 +78,7 @@ class AuthContext:
         self.permissions = grant.permissions
 
     def has(self, permission: Permission) -> bool:
-        return Permission.admin in self.permissions or permission in self.permissions
+        return Permission("memory.admin") in self.permissions or permission in self.permissions
 
 
 def _api_error(status_code: int, code: str, message: str, **details: object) -> HTTPException:
@@ -130,6 +139,24 @@ def _validate_reason(value: str | None, action: str) -> str:
     return value
 
 
+def _normalize_time_bound(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise _api_error(422, "invalid_request", "time bounds must include a timezone")
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _validate_time_window(
+    from_time: datetime | None, to_time: datetime | None
+) -> tuple[str | None, str | None]:
+    start = _normalize_time_bound(from_time)
+    end = _normalize_time_bound(to_time)
+    if start is not None and end is not None and start > end:
+        raise _api_error(422, "invalid_request", "from_time must not exceed to_time")
+    return start, end
+
+
 def _request_hash(operation: str, payload: object) -> str:
     canonical = json.dumps(
         {"operation": operation, "payload": payload},
@@ -171,7 +198,7 @@ def _authorize_record_edit(record: Record, auth: AuthContext) -> None:
         raise _api_error(409, "conflict", "canonical records must be revised by supersession")
     if record.write_policy == WritePolicy.immutable:
         raise _api_error(409, "conflict", "immutable records cannot be edited")
-    if Permission.admin in auth.permissions:
+    if Permission("memory.admin") in auth.permissions:
         return
     if record.write_policy == WritePolicy.admin_only:
         raise _api_error(403, "forbidden", "record write policy requires memory.admin")
@@ -181,7 +208,7 @@ def _authorize_record_edit(record: Record, auth: AuthContext) -> None:
 
 def _authorize_record_supersede(record: Record, auth: AuthContext) -> None:
     _require_permission(auth, Permission.edit)
-    if Permission.admin in auth.permissions:
+    if Permission("memory.admin") in auth.permissions:
         return
     if record.write_policy == WritePolicy.admin_only:
         raise _api_error(403, "forbidden", "record write policy requires memory.admin")
@@ -583,7 +610,7 @@ def create_app() -> FastAPI:
         if (
             patch.write_policy is not None
             and record.author_actor != auth.actor
-            and Permission.admin not in auth.permissions
+            and Permission("memory.admin") not in auth.permissions
         ):
             raise _api_error(
                 403,
@@ -638,7 +665,7 @@ def create_app() -> FastAPI:
         if (
             replacement.write_policy is not None
             and current.author_actor != auth.actor
-            and Permission.admin not in auth.permissions
+            and Permission("memory.admin") not in auth.permissions
         ):
             raise _api_error(
                 403,
@@ -959,6 +986,184 @@ def create_app() -> FastAPI:
         except CursorError as exc:
             raise _api_error(422, "invalid_request", str(exc)) from exc
         return SearchPage(results=results, next_cursor=next_cursor)
+
+    @app.get("/review/findings", response_model=FindingPage, tags=["review"])
+    def list_findings(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        finding_type: FindingType | None = Query(None),
+        finding_status: FindingStatus | None = Query(None, alias="status"),
+        subject_kind: ObjectKind | None = Query(None),
+        subject_id: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> FindingPage:
+        _require_permission(auth, Permission("memory.review"))
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        try:
+            findings, next_cursor = store.page_findings(
+                scope_path=effective_scope,
+                include_public=include_public,
+                finding_type=finding_type,
+                status=finding_status,
+                subject_kind=subject_kind,
+                subject_id=subject_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return FindingPage(findings=findings, next_cursor=next_cursor)
+
+    @app.post("/review/findings/{finding_id}/resolve", tags=["review"])
+    def resolve_finding(
+        finding_id: str,
+        resolution: FindingResolutionRequest,
+        response: Response,
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        if_match: str | None = Header(default=None, alias="If-Match"),
+        reason: str | None = Header(default=None, alias="X-MemoryV4-Reason"),
+    ) -> Finding:
+        _require_permission(auth, Permission("memory.review"))
+        key = _validate_idempotency_key(idempotency_key)
+        expected_version = _parse_version(if_match)
+        validated_reason = _validate_reason(reason, "finding resolution")
+        current = store.get_finding(finding_id)
+        if current is None or not ScopePath.is_descendant_or_equal(
+            current.scope_path, auth.scope_path
+        ):
+            raise _api_error(404, "not_found", "finding not found")
+        digest = _request_hash(
+            f"finding.resolve:{finding_id}",
+            {
+                "version": expected_version,
+                "reason": validated_reason,
+                "resolution": resolution.model_dump(mode="json"),
+            },
+        )
+        try:
+            updated, replayed = store.resolve_finding_idempotent(
+                finding_id,
+                resolution,
+                actor=auth.actor,
+                expected_version=expected_version,
+                reason=validated_reason,
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except IdempotencyConflictError as exc:
+            raise _api_error(409, "idempotency_conflict", "Idempotency-Key conflict") from exc
+        except KeyError as exc:
+            raise _api_error(404, "not_found", "finding not found") from exc
+        except VersionConflictError as exc:
+            raise _api_error(412, "version_conflict", "finding version does not match") from exc
+        except RecordStateConflictError as exc:
+            raise _api_error(409, "conflict", "finding is already closed") from exc
+        response.headers["Idempotency-Replayed"] = str(replayed).lower()
+        return updated
+
+    @app.get("/audit/events", response_model=AuditEventPage, tags=["audit"])
+    def list_audit_events(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        action: str | None = Query(None, min_length=1, max_length=200),
+        object_type: str | None = Query(None, min_length=1, max_length=100),
+        object_id: str | None = Query(None, min_length=1, max_length=200),
+        actor: str | None = Query(None, min_length=1, max_length=200),
+        from_time: datetime | None = Query(None),
+        to_time: datetime | None = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> AuditEventPage:
+        _require_permission(auth, Permission("memory.audit.read"))
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        start, end = _validate_time_window(from_time, to_time)
+        try:
+            events, next_cursor = store.page_audit_events(
+                scope_path=effective_scope,
+                include_public=include_public,
+                action=action,
+                object_type=object_type,
+                object_id=object_id,
+                actor=actor,
+                from_time=start,
+                to_time=end,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return AuditEventPage(events=events, next_cursor=next_cursor)
+
+    @app.get("/retrieval-events", response_model=RetrievalEventPage, tags=["audit"])
+    def list_retrieval_events(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        actor: str | None = Query(None, min_length=1, max_length=200),
+        degraded: bool | None = Query(None),
+        query_contains: str | None = Query(None, min_length=1, max_length=500),
+        from_time: datetime | None = Query(None),
+        to_time: datetime | None = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+    ) -> RetrievalEventPage:
+        _require_permission(auth, Permission("memory.audit.read"))
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        start, end = _validate_time_window(from_time, to_time)
+        try:
+            events, next_cursor = store.page_retrieval_events(
+                scope_path=effective_scope,
+                include_public=include_public,
+                actor=actor,
+                degraded=degraded,
+                query_contains=query_contains,
+                from_time=start,
+                to_time=end,
+                limit=limit,
+                cursor=cursor,
+            )
+        except CursorError as exc:
+            raise _api_error(422, "invalid_request", str(exc)) from exc
+        return RetrievalEventPage(events=events, next_cursor=next_cursor)
+
+    @app.get("/usage", response_model=UsageResponse, tags=["operations"])
+    def usage(
+        auth: AuthContext = Depends(require_auth),
+        store: SqliteStore = Depends(get_store),
+        scope_path: str | None = Query(None),
+        include_public: bool = Query(False),
+        from_time: datetime | None = Query(None),
+        to_time: datetime | None = Query(None),
+    ) -> UsageResponse:
+        _require_permission(auth, Permission("memory.admin"))
+        effective_scope = ScopePath.validate(scope_path or auth.scope_path)
+        _authorize_effective_scope(effective_scope, auth)
+        start, end = _validate_time_window(from_time, to_time)
+        objects, events = store.usage_summary(
+            scope_path=effective_scope,
+            include_public=include_public,
+            from_time=start,
+            to_time=end,
+        )
+        return UsageResponse(
+            scope_path=effective_scope,
+            include_public=include_public,
+            from_time=start,
+            to_time=end,
+            objects=objects,
+            events=events,
+        )
 
     return app
 

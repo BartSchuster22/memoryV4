@@ -1,6 +1,8 @@
 # MemoryV4 Core
 
-MemoryV4 is a slim FastAPI memory core. This slice implements a governed SQLite-only entity/record/relation/artifact graph, scoped retrieval and context APIs, additive migrations, and durable audit/retrieval events.
+MemoryV4 is a slim FastAPI memory core. This slice implements a governed SQLite-only
+object graph, scoped retrieval/context, record lifecycle, typed review findings,
+queryable audit/retrieval events, usage reporting, and additive migrations.
 
 The architecture and v1 contract are now locked:
 
@@ -34,7 +36,11 @@ Hard boundaries for this repository:
 - Governed record model with roles `canonical`, `active`, `evidence`, `exhaust` and lifecycles `live`, `working`, `superseded`, `archived`, `expired`.
 - `scope_path` tenant isolation using ancestor-or-equal visibility. Sibling tenant/user/agent/project branches are not returned.
 - Atomic canonical/immutable supersession plus governed archive, expiry, and exact restoration.
-- SQLite migration registry with reversible foundation, governance, core-object, and lifecycle migrations.
+- Typed finding list/resolve APIs with scope, optimistic concurrency, idempotency,
+  reviewer attribution, and audit.
+- Governed cursor APIs for audit/retrieval events and admin-only usage aggregation.
+- SQLite migration registry with reversible foundation, governance, core-object,
+  lifecycle, and review/audit/operations migrations.
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.
 - Audit events for governed writes and retrieval events for search.
 - SQLite FTS5 search when available, with safe lexical fallback.

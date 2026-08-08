@@ -420,5 +420,103 @@ class EntityContext(BaseModel):
     truncated: bool = False
 
 
+class FindingType(StrEnum):
+    candidate = "candidate"
+    contradiction = "contradiction"
+    stale = "stale"
+    health = "health"
+
+
+class FindingStatus(StrEnum):
+    open = "open"
+    resolved = "resolved"
+    dismissed = "dismissed"
+
+
+class FindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_type: FindingType
+    subject: ObjectRef
+    detail: dict[str, Any] = Field(default_factory=dict)
+    scope_path: str = "global"
+
+    @field_validator("scope_path")
+    @classmethod
+    def validate_scope_path(cls, value: str) -> str:
+        return ScopePath.validate(value)
+
+
+class Finding(FindingCreate):
+    id: str = Field(default_factory=lambda: f"fnd_{uuid4().hex}")
+    status: FindingStatus = FindingStatus.open
+    resolution: dict[str, Any] | None = None
+    created_by_actor: str
+    resolved_by_actor: str | None = None
+    resolved_at: str | None = None
+    version: int = Field(default=1, ge=1)
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class FindingResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: FindingStatus
+    resolution: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_terminal_status(self) -> FindingResolutionRequest:
+        if self.status == FindingStatus.open:
+            raise ValueError("finding resolution status must be resolved or dismissed")
+        return self
+
+
+class AuditEvent(BaseModel):
+    id: int
+    action: str
+    object_type: str
+    object_id: str
+    actor: str
+    scope_path: str
+    detail: dict[str, Any]
+    created_at: str
+
+
+class RetrievalEvent(BaseModel):
+    id: int
+    query: str
+    scope_path: str
+    actor: str
+    result_count: int = Field(ge=0)
+    degraded: bool
+    created_at: str
+
+
+class FindingPage(BaseModel):
+    findings: list[Finding]
+    next_cursor: str | None = None
+
+
+class AuditEventPage(BaseModel):
+    events: list[AuditEvent]
+    next_cursor: str | None = None
+
+
+class RetrievalEventPage(BaseModel):
+    events: list[RetrievalEvent]
+    next_cursor: str | None = None
+
+
+class UsageResponse(BaseModel):
+    scope_path: str
+    include_public: bool
+    from_time: str | None = None
+    to_time: str | None = None
+    generated_at: str = Field(default_factory=utc_now)
+    objects: dict[str, Any]
+    events: dict[str, int]
+
+
 class MigrationResult(BaseModel):
     applied: list[str]

@@ -6,7 +6,11 @@ The locked interface is [CONTRACT_V1.md](CONTRACT_V1.md), the service boundary i
 
 All routes except `GET /health` require bearer authentication. Every response includes `X-Request-ID` and `X-MemoryV4-Contract-Version: 1.0.0`. Handled failures use the v1 error envelope.
 
-Mutation routes require `Idempotency-Key`. PATCH, promotion, supersession, and lifecycle transition additionally require integer `If-Match`. Promotion, supersession, and transition require a trimmed `X-MemoryV4-Reason` of at most 500 characters. Exact replay returns the stored response with `Idempotency-Replayed: true`.
+Mutation routes require `Idempotency-Key`. PATCH, promotion, supersession, lifecycle
+transition, and finding resolution additionally require integer `If-Match`.
+Promotion, supersession, transition, and finding resolution require a trimmed
+`X-MemoryV4-Reason` of at most 500 characters. Exact replay returns the stored
+response with `Idempotency-Replayed: true`.
 
 List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused with a different scope, filter, sort, or query. `limit` is 1–100. Default visibility is ancestor-or-equal within the authenticated grant; siblings are excluded and `include_public=true` is explicit.
 
@@ -18,7 +22,7 @@ List APIs use opaque, filter-bound `cursor` pagination. Cursors cannot be reused
 | GET | `/capabilities` | `memory.read` | Runtime operation/governance support |
 | GET | `/schema` | `memory.read` | Machine-readable object contract |
 
-Healthy runtime response version is `0.4.0-record-lifecycle`.
+Healthy runtime response version is `0.5.0-review-audit-operations`.
 
 ## Entities
 
@@ -83,6 +87,39 @@ Artifact targets must exist and be visible from the artifact scope. Checksums us
 `GET /search` requires `memory.search`, emits a retrieval event, and supports role, lifecycle, entity, and tag filters plus filter-bound cursor pagination. SQLite FTS5/BM25 is used when available; lexical fallback keeps the same governance filters.
 
 `GET /context/{entity_type}/{id}` requires `memory.read` and aggregates the visible entity with linked records, direct relations, and artifacts. `limit` applies per collection and `truncated` reports whether any collection exceeded it.
+
+## Review findings
+
+Review/health workers persist typed findings through the Store seam; there is no
+public finding-creation endpoint.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/review/findings` | `memory.review` | Scope-governed, cursor-paginated queue |
+| POST | `/review/findings/{id}/resolve` | `memory.review` | Idempotent optimistic close as `resolved` or `dismissed` |
+
+Finding types are `candidate`, `contradiction`, `stale`, and `health`; statuses are
+`open`, `resolved`, and `dismissed`. List filters are `finding_type`, `status`,
+`subject_kind`, and `subject_id`. Findings contain a typed subject, structured
+detail/resolution, worker/reviewer attribution, timestamps, scope, and version.
+
+Resolution accepts `{"status":"resolved","resolution":{...}}` and requires
+`Idempotency-Key`, `If-Match`, and `X-MemoryV4-Reason`. Only an open finding may
+close. Closure increments its version and emits exactly one `finding.resolve` or
+`finding.dismiss` audit event; closed findings cannot reopen through this API.
+
+## Audit and operational retrieval
+
+| Method | Path | Permission | Filters / result |
+|---|---|---|---|
+| GET | `/audit/events` | `memory.audit.read` | `action`, object fields, `actor`, time bounds; cursor page |
+| GET | `/retrieval-events` | `memory.audit.read` | `actor`, `degraded`, `query_contains`, time bounds; cursor page |
+| GET | `/usage` | `memory.admin` | Current object breakdowns and windowed event counts |
+
+All apply effective-scope grant checks and ancestor-or-equal visibility;
+`include_public=true` is explicit. Time bounds are timezone-aware RFC3339 values with
+`from_time <= to_time`. Usage covers entities, records, relations, artifacts,
+findings, audit events, retrieval events, and degraded retrievals.
 
 ## Errors
 

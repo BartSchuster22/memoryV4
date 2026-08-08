@@ -68,6 +68,7 @@ def test_migrations_are_idempotent_and_reversible(tmp_path) -> None:
         "artifacts",
         "audit_events",
         "retrieval_events",
+        "review_findings",
         "idempotency_requests",
         "schema_migrations",
     } <= tables
@@ -124,7 +125,8 @@ def test_governance_migration_upgrades_existing_foundation_records(tmp_path) -> 
 
     result = migrate(db_path)
     assert result.applied == [
-        "0002_governance", "0003_core_objects", "0004_record_lifecycle"
+        "0002_governance", "0003_core_objects", "0004_record_lifecycle",
+        "0005_review_audit_operations"
     ]
     with sqlite3.connect(db_path) as conn:
         upgraded = conn.execute(
@@ -188,7 +190,9 @@ def test_core_object_migration_preserves_foundation_graph_rows(tmp_path) -> None
             ),
         )
 
-    assert migrate(db_path).applied == ["0003_core_objects", "0004_record_lifecycle"]
+    assert migrate(db_path).applied == [
+        "0003_core_objects", "0004_record_lifecycle", "0005_review_audit_operations"
+    ]
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         entity = conn.execute(

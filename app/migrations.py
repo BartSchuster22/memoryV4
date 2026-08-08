@@ -390,11 +390,79 @@ def _down_0004(conn: sqlite3.Connection) -> None:
     )
 
 
+def _up_0005(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        CREATE TABLE review_findings (
+          id TEXT PRIMARY KEY,
+          finding_type TEXT NOT NULL
+            CHECK(finding_type IN ('candidate','contradiction','stale','health')),
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK(status IN ('open','resolved','dismissed')),
+          subject_kind TEXT NOT NULL CHECK(subject_kind IN ('entity','record','artifact')),
+          subject_entity_type TEXT,
+          subject_id TEXT NOT NULL,
+          detail_json TEXT NOT NULL DEFAULT '{}',
+          resolution_json TEXT,
+          scope_path TEXT NOT NULL,
+          created_by_actor TEXT NOT NULL,
+          resolved_by_actor TEXT,
+          resolved_at TEXT,
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(
+            (subject_kind = 'entity' AND subject_entity_type IS NOT NULL) OR
+            (subject_kind <> 'entity' AND subject_entity_type IS NULL)
+          ),
+          CHECK(
+            (status = 'open' AND resolution_json IS NULL AND resolved_by_actor IS NULL
+              AND resolved_at IS NULL) OR
+            (status IN ('resolved','dismissed') AND resolution_json IS NOT NULL
+              AND resolved_by_actor IS NOT NULL AND resolved_at IS NOT NULL)
+          )
+        );
+        CREATE INDEX idx_review_findings_scope ON review_findings(scope_path);
+        CREATE INDEX idx_review_findings_status ON review_findings(status, updated_at, id);
+        CREATE INDEX idx_review_findings_type ON review_findings(finding_type, updated_at, id);
+        CREATE INDEX idx_review_findings_subject ON review_findings(
+          subject_kind, subject_entity_type, subject_id
+        );
+        CREATE INDEX idx_audit_events_scope_created
+          ON audit_events(scope_path, created_at, id);
+        CREATE INDEX idx_audit_events_action_created
+          ON audit_events(action, created_at, id);
+        CREATE INDEX idx_audit_events_actor_created
+          ON audit_events(actor, created_at, id);
+        CREATE INDEX idx_retrieval_events_scope_created
+          ON retrieval_events(scope_path, created_at, id);
+        CREATE INDEX idx_retrieval_events_actor_created
+          ON retrieval_events(actor, created_at, id);
+        """,
+    )
+
+
+def _down_0005(conn: sqlite3.Connection) -> None:
+    _executescript(
+        conn,
+        """
+        DROP INDEX IF EXISTS idx_retrieval_events_actor_created;
+        DROP INDEX IF EXISTS idx_retrieval_events_scope_created;
+        DROP INDEX IF EXISTS idx_audit_events_actor_created;
+        DROP INDEX IF EXISTS idx_audit_events_action_created;
+        DROP INDEX IF EXISTS idx_audit_events_scope_created;
+        DROP TABLE IF EXISTS review_findings;
+        """,
+    )
+
+
 MIGRATIONS = [
     Migration("0001_foundation", _up_0001, _down_0001),
     Migration("0002_governance", _up_0002, _down_0002),
     Migration("0003_core_objects", _up_0003, _down_0003),
     Migration("0004_record_lifecycle", _up_0004, _down_0004),
+    Migration("0005_review_audit_operations", _up_0005, _down_0005),
 ]
 
 

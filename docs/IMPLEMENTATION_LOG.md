@@ -25,3 +25,13 @@ Live impact:
 - No live deploy.
 - No MemoryV3 mutation.
 - No cutover.
+
+## Phase 5 — review, audit, and operational APIs
+
+- Added reversible `0005_review_audit_operations` with typed finding-state integrity
+  and audit/retrieval query indexes.
+- Added scoped/filterable/cursor-paginated finding review and idempotent optimistic
+  closure with reviewer attribution and audit.
+- Added governed audit/retrieval event queries and admin-only usage aggregation.
+- Added authorization, scope isolation, cursor, time-window, stale-version,
+  idempotency, concurrency, capability, audit, and database-integrity coverage.

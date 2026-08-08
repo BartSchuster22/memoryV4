@@ -172,25 +172,25 @@ OPERATIONS = [
     ),
     CapabilityOperation(
         method="GET", path="/review/findings", permission=Permission.review,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="POST", path="/review/findings/{id}/resolve",
-        permission=Permission.review, status=OperationStatus.planned, mutation=True,
+        permission=Permission.review, status=OperationStatus.implemented, mutation=True,
         idempotency_required=True, version_precondition_required=True,
         reason_required=True,
     ),
     CapabilityOperation(
         method="GET", path="/audit/events", permission=Permission.audit_read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="GET", path="/retrieval-events", permission=Permission.audit_read,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
     CapabilityOperation(
         method="GET", path="/usage", permission=Permission.admin,
-        status=OperationStatus.planned,
+        status=OperationStatus.implemented,
     ),
 ]
 
@@ -296,8 +296,13 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "subject": "object reference",
             "detail": "object",
             "resolution": "nullable object",
+            "created_by_actor": "derived worker actor",
+            "resolved_by_actor": "nullable derived reviewer actor",
+            "resolved_at": "nullable RFC3339 UTC",
             "scope_path": "scope_path",
             "version": "integer>=1",
+            "created_at": "RFC3339 UTC",
+            "updated_at": "RFC3339 UTC",
         },
     },
     "error": ErrorResponse.model_json_schema(),

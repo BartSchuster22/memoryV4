@@ -14,11 +14,17 @@ from app.pagination import decode_cursor, encode_cursor
 from app.schemas import (
     Artifact,
     ArtifactCreate,
+    AuditEvent,
     Entity,
     EntityContext,
     EntityCreate,
     EntityPatch,
     EntityRef,
+    Finding,
+    FindingCreate,
+    FindingResolutionRequest,
+    FindingStatus,
+    FindingType,
     Lifecycle,
     ObjectKind,
     ObjectRef,
@@ -28,6 +34,7 @@ from app.schemas import (
     RecordSupersedeRequest,
     Relation,
     RelationCreate,
+    RetrievalEvent,
     Role,
     ScopePath,
     SearchResult,
@@ -1456,6 +1463,387 @@ class SqliteStore:
             truncated=truncated,
         )
 
+    def create_finding(self, finding: FindingCreate, *, actor: str) -> Finding:
+        """Persist a worker-produced review finding below the public API boundary."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._assert_review_subject_visible(conn, finding.subject, finding.scope_path)
+            created = Finding(**finding.model_dump(), created_by_actor=actor)
+            now = utc_now()
+            created.created_at = created.updated_at = now
+            conn.execute(
+                """
+                INSERT INTO review_findings(
+                  id, finding_type, status, subject_kind, subject_entity_type, subject_id,
+                  detail_json, resolution_json, scope_path, created_by_actor,
+                  resolved_by_actor, resolved_at, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, 1, ?, ?)
+                """,
+                (
+                    created.id,
+                    created.finding_type.value,
+                    created.status.value,
+                    created.subject.kind.value,
+                    created.subject.entity_type,
+                    created.subject.id,
+                    json.dumps(created.detail, sort_keys=True),
+                    created.scope_path,
+                    actor,
+                    now,
+                    now,
+                ),
+            )
+            self.write_audit(
+                conn,
+                action="finding.create",
+                object_type="finding",
+                object_id=created.id,
+                actor=actor,
+                scope_path=created.scope_path,
+                detail={"outcome": "success", "finding_type": created.finding_type.value},
+            )
+            return created
+
+    def get_finding(self, finding_id: str) -> Finding | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_findings WHERE id = ?", (finding_id,)
+            ).fetchone()
+        return self._finding_from_row(row) if row else None
+
+    def page_findings(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        finding_type: FindingType | None,
+        status: FindingStatus | None,
+        subject_kind: ObjectKind | None,
+        subject_id: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[Finding], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        context = {
+            "kind": "findings",
+            "scope": scope_path,
+            "public": include_public,
+            "finding_type": finding_type.value if finding_type else None,
+            "status": status.value if status else None,
+            "subject_kind": subject_kind.value if subject_kind else None,
+            "subject_id": subject_id,
+        }
+        offset = decode_cursor(cursor, context=context)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        for column, value in (
+            ("finding_type", finding_type.value if finding_type else None),
+            ("status", status.value if status else None),
+            ("subject_kind", subject_kind.value if subject_kind else None),
+            ("subject_id", subject_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM review_findings WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._finding_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=context) if has_more else None
+        return items, next_cursor
+
+    def resolve_finding_idempotent(
+        self,
+        finding_id: str,
+        resolution: FindingResolutionRequest,
+        *,
+        actor: str,
+        expected_version: int,
+        reason: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[Finding, bool]:
+        operation = f"finding.resolve:{finding_id}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = self._idempotency_replay(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                model=Finding,
+            )
+            if replay is not None:
+                return replay, True
+            row = conn.execute(
+                "SELECT * FROM review_findings WHERE id = ?", (finding_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(finding_id)
+            current = self._finding_from_row(row)
+            if current.version != expected_version:
+                raise VersionConflictError(finding_id)
+            if current.status != FindingStatus.open:
+                raise RecordStateConflictError(finding_id)
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                UPDATE review_findings
+                SET status = ?, resolution_json = ?, resolved_by_actor = ?, resolved_at = ?,
+                    updated_at = ?, version = version + 1
+                WHERE id = ? AND version = ? AND status = 'open'
+                """,
+                (
+                    resolution.status.value,
+                    json.dumps(resolution.resolution, sort_keys=True),
+                    actor,
+                    now,
+                    now,
+                    finding_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflictError(finding_id)
+            updated_row = conn.execute(
+                "SELECT * FROM review_findings WHERE id = ?", (finding_id,)
+            ).fetchone()
+            if updated_row is None:
+                raise KeyError(finding_id)
+            updated = self._finding_from_row(updated_row)
+            action = (
+                "finding.resolve"
+                if resolution.status == FindingStatus.resolved
+                else "finding.dismiss"
+            )
+            self.write_audit(
+                conn,
+                action=action,
+                object_type="finding",
+                object_id=finding_id,
+                actor=actor,
+                scope_path=current.scope_path,
+                detail={
+                    "outcome": "success",
+                    "reason": reason,
+                    "status": resolution.status.value,
+                    "source_version": expected_version,
+                },
+            )
+            self._save_idempotency(
+                conn,
+                actor=actor,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                result=updated,
+                object_id=finding_id,
+                status_code=200,
+            )
+            return updated, False
+
+    def page_audit_events(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        action: str | None,
+        object_type: str | None,
+        object_id: str | None,
+        actor: str | None,
+        from_time: str | None,
+        to_time: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[AuditEvent], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        filters = {
+            "kind": "audit_events",
+            "scope": scope_path,
+            "public": include_public,
+            "action": action,
+            "object_type": object_type,
+            "object_id": object_id,
+            "actor": actor,
+            "from": from_time,
+            "to": to_time,
+        }
+        offset = decode_cursor(cursor, context=filters)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        for column, value in (
+            ("action", action),
+            ("object_type", object_type),
+            ("object_id", object_id),
+            ("actor", actor),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        self._add_time_clauses(clauses, values, from_time, to_time)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM audit_events WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._audit_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=filters) if has_more else None
+        return items, next_cursor
+
+    def page_retrieval_events(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        actor: str | None,
+        degraded: bool | None,
+        query_contains: str | None,
+        from_time: str | None,
+        to_time: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[RetrievalEvent], str | None]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        filters = {
+            "kind": "retrieval_events",
+            "scope": scope_path,
+            "public": include_public,
+            "actor": actor,
+            "degraded": degraded,
+            "query_contains": query_contains,
+            "from": from_time,
+            "to": to_time,
+        }
+        offset = decode_cursor(cursor, context=filters)
+        placeholders = ",".join("?" for _ in scopes)
+        clauses = [f"scope_path IN ({placeholders})"]
+        values: list[object] = list(scopes)
+        if actor is not None:
+            clauses.append("actor = ?")
+            values.append(actor)
+        if degraded is not None:
+            clauses.append("degraded = ?")
+            values.append(int(degraded))
+        if query_contains is not None:
+            clauses.append("query LIKE ? ESCAPE '\\'")
+            escaped = query_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            values.append(f"%{escaped}%")
+        self._add_time_clauses(clauses, values, from_time, to_time)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM retrieval_events WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*values, limit + 1, offset],
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._retrieval_from_row(row) for row in rows[:limit]]
+        next_cursor = encode_cursor(offset=offset + limit, context=filters) if has_more else None
+        return items, next_cursor
+
+    def usage_summary(
+        self,
+        *,
+        scope_path: str,
+        include_public: bool,
+        from_time: str | None,
+        to_time: str | None,
+    ) -> tuple[dict[str, object], dict[str, int]]:
+        scopes = ScopePath.ancestors(scope_path, include_public=include_public)
+        placeholders = ",".join("?" for _ in scopes)
+        with self._connect() as conn:
+            def count(table: str, extra: str = "", values: list[object] | None = None) -> int:
+                sql = f"SELECT count(*) FROM {table} WHERE scope_path IN ({placeholders})"
+                if extra:
+                    sql += f" AND {extra}"
+                return int(conn.execute(sql, [*scopes, *(values or [])]).fetchone()[0])
+
+            def grouped(table: str, column: str) -> dict[str, int]:
+                rows = conn.execute(
+                    f"SELECT {column}, count(*) AS total FROM {table} "
+                    f"WHERE scope_path IN ({placeholders}) GROUP BY {column}",
+                    scopes,
+                ).fetchall()
+                return {str(row[0]): int(row[1]) for row in rows}
+
+            objects: dict[str, object] = {
+                "entities": {"total": count("entities")},
+                "records": {
+                    "total": count("records"),
+                    "soft_deleted": count("records", "deleted_at IS NOT NULL"),
+                    "by_role": grouped("records", "role"),
+                    "by_lifecycle": grouped("records", "lifecycle"),
+                },
+                "relations": {"total": count("relations")},
+                "artifacts": {"total": count("artifacts")},
+                "findings": {
+                    "total": count("review_findings"),
+                    "by_type": grouped("review_findings", "finding_type"),
+                    "by_status": grouped("review_findings", "status"),
+                },
+            }
+            event_clauses = [f"scope_path IN ({placeholders})"]
+            event_values: list[object] = list(scopes)
+            self._add_time_clauses(event_clauses, event_values, from_time, to_time)
+            where = " AND ".join(event_clauses)
+            audit_total = int(
+                conn.execute(f"SELECT count(*) FROM audit_events WHERE {where}", event_values)
+                .fetchone()[0]
+            )
+            retrieval_total = int(
+                conn.execute(
+                    f"SELECT count(*) FROM retrieval_events WHERE {where}", event_values
+                ).fetchone()[0]
+            )
+            degraded_total = int(
+                conn.execute(
+                    f"SELECT count(*) FROM retrieval_events WHERE {where} AND degraded = 1",
+                    event_values,
+                ).fetchone()[0]
+            )
+        return objects, {
+            "audit_events": audit_total,
+            "retrieval_events": retrieval_total,
+            "degraded_retrievals": degraded_total,
+        }
+
+    @staticmethod
+    def _add_time_clauses(
+        clauses: list[str], values: list[object], from_time: str | None, to_time: str | None
+    ) -> None:
+        if from_time is not None:
+            clauses.append("created_at >= ?")
+            values.append(from_time)
+        if to_time is not None:
+            clauses.append("created_at <= ?")
+            values.append(to_time)
+
+    def _assert_review_subject_visible(
+        self, conn: sqlite3.Connection, ref: ObjectRef, scope_path: str
+    ) -> None:
+        if ref.kind == ObjectKind.record:
+            row = conn.execute(
+                "SELECT scope_path FROM records WHERE id = ?", (ref.id,)
+            ).fetchone()
+            if row is None or row["scope_path"] not in ScopePath.ancestors(scope_path):
+                raise KeyError(ref.id)
+            return
+        self._assert_reference_visible(conn, ref, scope_path)
+
     def reference_visible(self, ref: ObjectRef, *, scope_path: str) -> bool:
         with self._connect() as conn:
             try:
@@ -1533,6 +1921,52 @@ class SqliteStore:
             version=row["version"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    def _finding_from_row(self, row: sqlite3.Row) -> Finding:
+        return Finding(
+            id=row["id"],
+            finding_type=row["finding_type"],
+            status=row["status"],
+            subject=ObjectRef(
+                kind=row["subject_kind"],
+                entity_type=row["subject_entity_type"],
+                id=row["subject_id"],
+            ),
+            detail=json.loads(row["detail_json"]),
+            resolution=json.loads(row["resolution_json"]) if row["resolution_json"] else None,
+            scope_path=row["scope_path"],
+            created_by_actor=row["created_by_actor"],
+            resolved_by_actor=row["resolved_by_actor"],
+            resolved_at=row["resolved_at"],
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _audit_from_row(row: sqlite3.Row) -> AuditEvent:
+        return AuditEvent(
+            id=row["id"],
+            action=row["action"],
+            object_type=row["object_type"],
+            object_id=row["object_id"],
+            actor=row["actor"],
+            scope_path=row["scope_path"],
+            detail=json.loads(row["detail_json"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _retrieval_from_row(row: sqlite3.Row) -> RetrievalEvent:
+        return RetrievalEvent(
+            id=row["id"],
+            query=row["query"],
+            scope_path=row["scope_path"],
+            actor=row["actor"],
+            result_count=row["result_count"],
+            degraded=bool(row["degraded"]),
+            created_at=row["created_at"],
         )
 
     def write_audit(

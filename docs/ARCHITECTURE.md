@@ -12,9 +12,12 @@ MemoryV4 core is a slim FastAPI service around one governed object graph and a S
 - artifacts linked to records/entities;
 - FTS-backed record retrieval;
 - entity-context aggregation;
-- audit and retrieval events.
+- typed review findings and governed closure;
+- governed audit/retrieval event APIs and usage aggregation.
 
-UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vector embeddings, Postgres, and MemoryV3 cutover logic remain outside this slice.
+UI/explorer surfaces, Kanban/orchestration, worker scheduling/execution, vector
+embeddings, Postgres, and MemoryV3 cutover remain outside this slice. Workers may
+persist findings through the Store seam but do not run in this container.
 
 ## Non-negotiables
 
@@ -22,7 +25,7 @@ UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vec
 2. **Governance is in core.** Roles, lifecycle, write policy, actor identity, action grants, scope isolation, idempotency, optimistic versions, and mutation audit are enforced below every client.
 3. **No autonomous canonical writes.** Autonomous grants create only active/working candidates; canonical creation/promotion requires `memory.promote`.
 4. **Slim boundary.** UI and orchestration belong elsewhere.
-5. **Additive migrations.** `0001_foundation` through `0004_record_lifecycle` have ordered up/down paths.
+5. **Additive migrations.** `0001_foundation` through `0005_review_audit_operations` have ordered up/down paths.
 6. **Scope isolation is graph-wide.** Direct/list/search/context reads use ancestor-or-equal visibility. New links require every referenced object to exist and be visible from the link scope, preventing sibling edges.
 7. **Opaque pagination state is not authority.** Cursors are bound to scope/query/filter/sort context; authorization is reevaluated on every page request.
 
@@ -37,6 +40,8 @@ UI/explorer surfaces, Kanban/orchestration, distillation and health workers, vec
 - `tests/test_core_objects.py`: composite identity, object graph, pagination, filters, context, integrity, and scope tests.
 - `tests/test_governance.py`: permissions, write policy, delegation, idempotency/concurrency, promotion, and denial audit.
 - `tests/test_lifecycle.py`: transition matrix, exact restoration, atomic supersession, state integrity, concurrency, and audit.
+- `tests/test_operational_apis.py`: review, audit/retrieval queries, usage, scope,
+  integrity, pagination, and concurrency.
 - `tests/test_foundation.py`, `tests/test_contract.py`, `tests/test_health.py`: migration/storage, contract, and health coverage.
 
 ## Storage and retrieval
@@ -46,6 +51,11 @@ SQLite is the only backend. WAL and busy-timeout settings support serialized mut
 `0003_core_objects` rebuilds entity identity as `(entity_type,id)`, expands records with entity IDs/tags/confidence/supersession/deletion metadata, and replaces foundation relation/artifact layouts with typed references and versions. Existing rows are preserved with safe defaults.
 
 `0004_record_lifecycle` adds prior-state and lifecycle-time metadata, supersession indexes, and database guards for lifecycle/deletion/supersession consistency. Transition objects, source/replacement records, audit details, and idempotency responses commit in one `BEGIN IMMEDIATE` transaction.
+
+`0005_review_audit_operations` adds the typed `review_findings` queue, integrity
+constraints for subject/status/resolution state, and indexes for finding, audit, and
+retrieval queries. Finding closure, audit, and idempotency replay are one
+`BEGIN IMMEDIATE` transaction. SQL remains in the Store adapter.
 
 ## Scope model
 
