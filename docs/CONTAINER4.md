@@ -17,6 +17,8 @@ MemoryV4 is Alica-v1 **Container 4**: a single private Tier-3 service reached on
 - health, restart, CPU, memory, PID, and log-rotation controls.
 
 The backup volume is deliberately **not mounted in the long-running application container**. A hardened, networkless one-shot container performs online SQLite backup and verification against the data volume.
+The image declares no Docker `VOLUME`; persistence is explicit in the production
+orchestrator so upgrades cannot silently retain or create an undeclared backup mount.
 
 ## Build and immutable release
 

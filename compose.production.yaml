@@ -26,7 +26,6 @@ services:
     secrets:
       - source: api_key
         target: api_key
-        mode: 0444
     volumes:
       - memoryv4_data:/data
     networks:
