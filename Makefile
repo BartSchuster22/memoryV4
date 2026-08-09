@@ -17,8 +17,7 @@ qa: lint test qa10
 
 qa10:
 	@mkdir -p build
-	@printf '%s\n' '{"status":"partial","phase":"persistence-recovery","pass":0,"partial":[1,2,3,5,6,7,8,9,10],"not_implemented":[4],"message":"Persistence and recovery hardening complete; full QA10 remains incomplete. See docs/QA10.md."}' > build/qa10-scorecard.json
-	@cat build/qa10-scorecard.json
+	$(PYTHON) scripts/qa10.py
 
 docker-build:
 	docker build -t $(IMAGE) .

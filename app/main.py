@@ -70,7 +70,7 @@ from app.storage import (
 )
 
 APP_NAME = "memoryv4-core"
-APP_VERSION = "0.6.0-persistence-recovery"
+APP_VERSION = "0.7.0-production-qa"
 
 
 class AuthContext:

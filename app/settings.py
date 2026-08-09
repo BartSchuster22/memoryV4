@@ -33,7 +33,7 @@ class Settings:
     """Runtime settings for the private SQLite-only service."""
 
     service_name: str = "memoryv4-core"
-    version: str = "0.6.0-persistence-recovery"
+    version: str = "0.7.0-production-qa"
     storage_backend: str = "sqlite"
     database_path: Path = Path("/data/memoryv4.sqlite3")
     sqlite_busy_timeout_ms: int = 5000

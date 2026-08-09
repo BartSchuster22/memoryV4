@@ -41,6 +41,8 @@ Hard boundaries for this repository:
 - Typed finding list/resolve APIs with scope, optimistic concurrency, idempotency,
   reviewer attribution, and audit.
 - Governed cursor APIs for audit/retrieval events and admin-only usage aggregation.
+- Bounded record content (1,000,000 characters), source references, structured JSON fields,
+  and scope paths with fail-closed malformed-input handling.
 - SQLite migration registry with reversible foundation, governance, core-object,
   lifecycle, and review/audit/operations migrations.
 - `SqliteStore` adapter below a store protocol; SQL/FTS5 specifics stay in the adapter.

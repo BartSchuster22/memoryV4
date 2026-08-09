@@ -41,7 +41,7 @@ docker exec memoryv4-core python -m app.recovery checkpoint \
   --database /data/memoryv4.sqlite3
 ```
 
-Healthy output reports service version `0.6.0-persistence-recovery` and status `ok`.
+Healthy output reports service version `0.7.0-production-qa` and status `ok`.
 Current migration history is `0001_foundation` through
 `0005_review_audit_operations`.
 

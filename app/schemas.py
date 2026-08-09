@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -10,6 +11,12 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.contracts import WritePolicy
+
+MAX_CONTENT_LENGTH = 1_000_000
+MAX_JSON_FIELD_BYTES = 262_144
+MAX_SOURCE_REFS = 100
+MAX_SOURCE_REF_LENGTH = 2_048
+MAX_SCOPE_PATH_LENGTH = 1_000
 
 
 class Role(StrEnum):
@@ -45,6 +52,10 @@ class ScopePath:
     def validate(value: str) -> str:
         if not value or value.strip() != value:
             raise ValueError("scope_path must be non-empty and trimmed")
+        if len(value) > MAX_SCOPE_PATH_LENGTH or any(ord(char) < 32 for char in value):
+            raise ValueError(
+                "scope_path must be at most 1000 characters with no control characters"
+            )
         if value in {"global", "public"}:
             return value
         parts = value.split("/")
@@ -96,6 +107,30 @@ def _trimmed_identifier(value: str) -> str:
     return value
 
 
+def _bounded_json_object(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("JSON object must contain serializable values") from exc
+    if len(encoded) > MAX_JSON_FIELD_BYTES:
+        raise ValueError("JSON object must not exceed 262144 encoded bytes")
+    return value
+
+
+def _bounded_source_refs(values: list[str]) -> list[str]:
+    if len(values) > MAX_SOURCE_REFS:
+        raise ValueError("source_refs must contain at most 100 items")
+    if any(
+        not value
+        or value != value.strip()
+        or len(value) > MAX_SOURCE_REF_LENGTH
+        or any(ord(char) < 32 for char in value)
+        for value in values
+    ):
+        raise ValueError("source_refs must be trimmed strings of at most 2048 characters")
+    return values
+
+
 class EntityRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -127,6 +162,11 @@ class EntityCreate(BaseModel):
     def validate_scope_path(cls, value: str) -> str:
         return ScopePath.validate(value)
 
+    @field_validator("attrs")
+    @classmethod
+    def validate_attrs(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_json_object(value)
+
 
 class Entity(EntityCreate):
     version: int = Field(default=1, ge=1)
@@ -140,6 +180,11 @@ class EntityPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=240)
     attrs: dict[str, Any] | None = None
 
+    @field_validator("attrs")
+    @classmethod
+    def validate_attrs(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return None if value is None else _bounded_json_object(value)
+
     @model_validator(mode="after")
     def require_change(self) -> EntityPatch:
         if not self.model_fields_set:
@@ -151,7 +196,7 @@ class RecordCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=240)
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     role: Role
     lifecycle: Lifecycle
     write_policy: WritePolicy = WritePolicy.author_only
@@ -160,7 +205,7 @@ class RecordCreate(BaseModel):
     topic: str | None = Field(default=None, max_length=240)
     tags: list[str] = Field(default_factory=list, max_length=50)
     confidence: float | None = Field(default=None, ge=0, le=1)
-    source_refs: list[str] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list, max_length=MAX_SOURCE_REFS)
     provenance: dict[str, Any] = Field(default_factory=dict)
     attrs: dict[str, Any] = Field(default_factory=dict)
 
@@ -177,6 +222,16 @@ class RecordCreate(BaseModel):
         if len(set(values)) != len(values):
             raise ValueError("tags must be unique")
         return values
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, values: list[str]) -> list[str]:
+        return _bounded_source_refs(values)
+
+    @field_validator("provenance", "attrs")
+    @classmethod
+    def validate_json_objects(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_json_object(value)
 
 
 class Record(RecordCreate):
@@ -196,12 +251,12 @@ class RecordPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, min_length=1, max_length=240)
-    content: str | None = Field(default=None, min_length=1)
+    content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
     entity: EntityRef | None = None
     topic: str | None = Field(default=None, max_length=240)
     tags: list[str] | None = Field(default=None, max_length=50)
     confidence: float | None = Field(default=None, ge=0, le=1)
-    source_refs: list[str] | None = None
+    source_refs: list[str] | None = Field(default=None, max_length=MAX_SOURCE_REFS)
     provenance: dict[str, Any] | None = None
     attrs: dict[str, Any] | None = None
     write_policy: WritePolicy | None = None
@@ -216,6 +271,16 @@ class RecordPatch(BaseModel):
         if len(set(values)) != len(values):
             raise ValueError("tags must be unique")
         return values
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else _bounded_source_refs(values)
+
+    @field_validator("provenance", "attrs")
+    @classmethod
+    def validate_json_objects(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return None if value is None else _bounded_json_object(value)
 
     @model_validator(mode="after")
     def require_change(self) -> RecordPatch:
@@ -230,12 +295,12 @@ class RecordSupersedeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, min_length=1, max_length=240)
-    content: str | None = Field(default=None, min_length=1)
+    content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
     entity: EntityRef | None = None
     topic: str | None = Field(default=None, max_length=240)
     tags: list[str] | None = Field(default=None, max_length=50)
     confidence: float | None = Field(default=None, ge=0, le=1)
-    source_refs: list[str] | None = None
+    source_refs: list[str] | None = Field(default=None, max_length=MAX_SOURCE_REFS)
     provenance: dict[str, Any] | None = None
     attrs: dict[str, Any] | None = None
     write_policy: WritePolicy | None = None
@@ -250,6 +315,16 @@ class RecordSupersedeRequest(BaseModel):
         if len(set(values)) != len(values):
             raise ValueError("tags must be unique")
         return values
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else _bounded_source_refs(values)
+
+    @field_validator("provenance", "attrs")
+    @classmethod
+    def validate_json_objects(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return None if value is None else _bounded_json_object(value)
 
     @model_validator(mode="after")
     def require_change(self) -> RecordSupersedeRequest:
@@ -303,6 +378,11 @@ class RelationCreate(BaseModel):
     @classmethod
     def validate_scope_path(cls, value: str) -> str:
         return ScopePath.validate(value)
+
+    @field_validator("provenance")
+    @classmethod
+    def validate_provenance(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_json_object(value)
 
 
 class Relation(BaseModel):
@@ -366,6 +446,11 @@ class ArtifactCreate(BaseModel):
     @classmethod
     def validate_scope_path(cls, value: str) -> str:
         return ScopePath.validate(value)
+
+    @field_validator("provenance")
+    @classmethod
+    def validate_provenance(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_json_object(value)
 
     @model_validator(mode="after")
     def require_target(self) -> ArtifactCreate:

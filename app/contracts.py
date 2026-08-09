@@ -220,7 +220,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "fields": {
             "id": "string(rec_*)",
             "title": "string(1..240)",
-            "content": "string",
+            "content": "string(1..1000000)",
             "role": ["canonical", "active", "evidence", "exhaust"],
             "lifecycle": ["live", "working", "superseded", "archived", "expired"],
             "write_policy": [policy.value for policy in WritePolicy],
