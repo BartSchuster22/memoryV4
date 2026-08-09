@@ -1,0 +1,12 @@
+[Unit]
+Description=Five-minute MemoryV4 Container 4 health and isolation monitor
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+AccuracySec=30s
+Persistent=true
+Unit=memoryv4-monitor.service
+
+[Install]
+WantedBy=timers.target

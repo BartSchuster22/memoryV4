@@ -11,6 +11,7 @@ The architecture and v1 contract are now locked:
 - [Tier-3 architecture ADR](docs/ADR-0001-TIER3-BOUNDARY.md)
 - [API/object/error contract v1](docs/CONTRACT_V1.md)
 - [Enforced governance model](docs/GOVERNANCE.md)
+- [Container 4 production runbook](docs/CONTAINER4.md)
 - Authenticated `GET /capabilities` for truthful runtime support discovery
 - Authenticated `GET /schema` for the machine-readable object contract
 
@@ -112,21 +113,21 @@ docker compose up --build
 
 ### Hardened production compose
 
-`compose.production.yaml` packages the same single service with a loopback-only port,
-non-root UID, read-only root filesystem, dropped capabilities, `no-new-privileges`,
-resource limits, persistent data/backup volumes, full startup integrity checks, and a
-one-shot, network-isolated credential initializer. The application receives only a
-read-only credential volume; the host secret is never mounted into the long-running
-service.
+`compose.production.yaml` packages the same single service with no host port, an
+immutable image reference, non-root UID, read-only root filesystem, dropped
+capabilities, `no-new-privileges`, resource limits, one persistent data volume, full
+startup integrity checks, and a read-only Compose secret. It joins only UNIFY's
+internal Memory network. Backups run in a separate networkless one-shot container;
+the backup volume is not mounted in the long-running application.
 
 ```bash
 export MEMORYV4_API_SCOPE=org:example
 export MEMORYV4_API_KEY_SECRET_FILE=/secure/path/memory_v4_token
-export MEMORYV4_PORT=28084
+export MEMORYV4_IMAGE=sha256:<64-hex-image-id>
 docker compose -f compose.production.yaml config --quiet
-docker compose -f compose.production.yaml up -d --build
+docker compose -f compose.production.yaml up -d --wait
 docker compose -f compose.production.yaml ps
-curl -fsS http://127.0.0.1:28084/health
+python3 ops/container4/healthcheck.py
 ```
 
 The production service remains separate from MemoryV3. Starting it does not perform a

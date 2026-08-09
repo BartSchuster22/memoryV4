@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified MemoryV4 Container 4 backup schedule
+
+[Timer]
+OnCalendar=*-*-* 02:17:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=memoryv4-backup.service
+
+[Install]
+WantedBy=timers.target

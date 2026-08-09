@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="MemoryV4 Core" \
+      org.opencontainers.image.source="https://github.com/BartSchuster22/memoryV4" \
+      org.opencontainers.image.revision="$VCS_REF"
+
 ENV PYTHONDONTWRITEBYTECODE=1     PYTHONUNBUFFERED=1     MEMORYV4_DB_PATH=/data/memoryv4.sqlite3
 
 WORKDIR /app

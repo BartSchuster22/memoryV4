@@ -1,0 +1,17 @@
+[Unit]
+Description=Verify MemoryV4 Container 4 production invariants
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/memory-v4/ops/container4/healthcheck.py
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

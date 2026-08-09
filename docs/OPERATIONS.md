@@ -45,8 +45,9 @@ Healthy output reports service version `0.7.0-production-qa` and status `ok`.
 Current migration history is `0001_foundation` through
 `0005_review_audit_operations`.
 
-`docker compose up --build` is local convenience. Compose remains one application
-service but mounts separate `/data` and `/backups` volumes.
+`docker compose up --build` is local convenience. Production uses the immutable
+`compose.production.yaml`; the long-running service mounts only `/data`. A hardened
+networkless one-shot container mounts `/data` and `/backups` for scheduled backup.
 
 ## Runtime configuration
 
@@ -131,5 +132,6 @@ secret file. Contract negotiation uses `/capabilities` and requires
 ## Source-control and live boundary
 
 Database/WAL/SHM files, backups, manifests containing deployment metadata, local
-caches, `.env`, and secrets must not be committed. This phase performs no live
-deployment, MemoryV3 cutover, or writes to Hermes-generated memory files.
+caches, `.env`, and secrets must not be committed. The Container 4 deployment is
+documented in [CONTAINER4.md](CONTAINER4.md). It performs no MemoryV3 cutover and
+does not write to Hermes-generated memory files.

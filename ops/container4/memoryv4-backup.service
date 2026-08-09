@@ -1,0 +1,19 @@
+[Unit]
+Description=Create and verify a MemoryV4 Container 4 online backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/memory-v4/ops/container4/backup.sh
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run /var/lib/docker
+
+[Install]
+WantedBy=multi-user.target

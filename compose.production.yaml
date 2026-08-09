@@ -1,66 +1,63 @@
 name: memory-v4
 
 services:
-  credential-init:
-    image: python:3.12-slim
-    user: '0:0'
-    read_only: true
-    cap_drop: [ALL]
-    cap_add: [DAC_READ_SEARCH]
-    security_opt: [no-new-privileges:true]
-    network_mode: none
-    restart: 'no'
-    command:
-      - python
-      - -c
-      - |
-        from pathlib import Path
-        source = Path('/run/secrets/api_key').read_bytes()
-        if not source.strip():
-            raise SystemExit('API key secret is empty')
-        destination = Path('/credential/api_key')
-        destination.write_bytes(source)
-        destination.chmod(0o444)
-    secrets: [api_key]
-    volumes: [memoryv4_credential:/credential]
-
-  memoryv4-core:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: memoryv4-core:production
+  memory-v4:
+    image: ${MEMORYV4_IMAGE:?MEMORYV4_IMAGE must be an immutable sha256 digest}
     user: '65532:65532'
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
     mem_limit: 512m
-    cpus: 0.75
+    cpus: 1
     init: true
     stop_grace_period: 30s
     restart: unless-stopped
-    tmpfs: ['/tmp:uid=65532,gid=65532,mode=0700']
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=0700,uid=65532,gid=65532
     environment:
       MEMORYV4_DB_PATH: /data/memoryv4.sqlite3
-      MEMORYV4_API_KEY_FILE: /run/credential/api_key
+      MEMORYV4_API_KEY_FILE: /run/secrets/api_key
       MEMORYV4_API_SCOPE: ${MEMORYV4_API_SCOPE:?MEMORYV4_API_SCOPE is required}
-      MEMORYV4_API_ACTOR: unify:gateway
-      MEMORYV4_API_PERMISSIONS: memory.admin
+      MEMORYV4_API_ACTOR: unify-gateway
+      MEMORYV4_API_PERMISSIONS: memory.read,memory.search,memory.create-working,memory.create,memory.edit,memory.promote,memory.archive,memory.review,memory.audit.read,memory.admin
       MEMORYV4_API_ALLOW_ACTOR_DELEGATION: 'true'
       MEMORYV4_STARTUP_INTEGRITY_CHECK: full
-    ports: ['127.0.0.1:${MEMORYV4_PORT:-28084}:8000']
+    secrets:
+      - source: api_key
+        target: api_key
+        mode: 0444
     volumes:
       - memoryv4_data:/data
-      - memoryv4_backups:/backups
-      - memoryv4_credential:/run/credential:ro
-    depends_on:
-      credential-init: { condition: service_completed_successfully }
+    networks:
+      memory_private:
+        aliases: [memory-v4]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2); raise SystemExit(0 if json.load(r).get('status') == 'ok' else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
 
 secrets:
   api_key:
     file: ${MEMORYV4_API_KEY_SECRET_FILE:?MEMORYV4_API_KEY_SECRET_FILE is required}
 
 volumes:
-  memoryv4_data: {}
-  memoryv4_backups: {}
-  memoryv4_credential: {}
+  memoryv4_data:
+    external: true
+    name: ${MEMORYV4_DATA_VOLUME:-memory-v4-data-v1}
+
+networks:
+  memory_private:
+    external: true
+    name: ${MEMORYV4_PRIVATE_NETWORK:-unify_memory-private}
