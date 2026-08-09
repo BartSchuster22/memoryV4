@@ -12,11 +12,14 @@ The architecture and v1 contract are now locked:
 - [API/object/error contract v1](docs/CONTRACT_V1.md)
 - [Enforced governance model](docs/GOVERNANCE.md)
 - [Container 4 production runbook](docs/CONTAINER4.md)
+- [Production acceptance and authority evidence](docs/PRODUCTION_ACCEPTANCE.md)
+- [Authority cutover and rollback](docs/CUTOVER.md)
 - Authenticated `GET /capabilities` for truthful runtime support discovery
 - Authenticated `GET /schema` for the machine-readable object contract
 
 Hard boundaries for this repository:
-- no MemoryV3 cutover or live-memory mutation
+- MemoryV4 is the authoritative Tier-3 service; retained MemoryV3 source data is never
+  modified or deleted by this repository
 - no UI/explorer or Kanban/orchestration code in core
 - SQLite-only implementation now; Postgres is a future Store adapter slot only
 - no autonomous process writes canonical memory; v1 action permissions enforce this boundary in core
@@ -130,8 +133,9 @@ docker compose -f compose.production.yaml ps
 python3 ops/container4/healthcheck.py
 ```
 
-The production service remains separate from MemoryV3. Starting it does not perform a
-MemoryV3 cutover, migrate MemoryV3 data, or enable a consuming adapter automatically.
+Production adoption and authority cutover are explicit operator procedures. They never
+run on ordinary service startup. The accepted production state and retained rollback path
+are documented in `docs/PRODUCTION_ACCEPTANCE.md` and `docs/CUTOVER.md`.
 
 ## Runtime configuration
 

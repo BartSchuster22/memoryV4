@@ -133,5 +133,6 @@ secret file. Contract negotiation uses `/capabilities` and requires
 
 Database/WAL/SHM files, backups, manifests containing deployment metadata, local
 caches, `.env`, and secrets must not be committed. The Container 4 deployment is
-documented in [CONTAINER4.md](CONTAINER4.md). It performs no MemoryV3 cutover and
-does not write to Hermes-generated memory files.
+documented in [CONTAINER4.md](CONTAINER4.md). MemoryV4 is the accepted authoritative
+Tier-3 service; authority cutover and rollback are governed by [CUTOVER.md](CUTOVER.md).
+The service does not write to Hermes-generated memory files.

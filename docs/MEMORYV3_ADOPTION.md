@@ -94,3 +94,11 @@ If apply, startup, reconciliation, or QA fails:
 
 No authority cutover, MemoryV3 shutdown, route change, or source deletion may occur without a
 separate explicit user approval after shadow comparison and reconciliation are complete.
+
+## Approved production outcome
+
+That separate approval was provided for Phase 14 on 2026-08-09 after reconciliation,
+QA, backup, and restore acceptance passed. MemoryV4 is now authoritative. MemoryV3 was
+stopped with restart disabled to prevent divergent writes, but its source volume and final
+verified snapshot were preserved. No source data was modified or deleted. See
+[PRODUCTION_ACCEPTANCE.md](PRODUCTION_ACCEPTANCE.md) and [CUTOVER.md](CUTOVER.md).
