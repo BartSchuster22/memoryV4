@@ -4,7 +4,7 @@
 - **Authority effective:** 2026-08-09 UTC
 - **Core revision:** `3ce1c24623890aba2b67311610d629370439f2be`
 - **MemoryV4 image:** `sha256:977cf9b5ddca7b32f55e079eef9d7631b4fc65e9396d11cce245927172c0b4e1`
-- **UNIFY release:** `phase-18.3-8367fd0`
+- **UNIFY release:** `phase-18.4-a5368aa`
 
 Production evidence containing databases or deployment metadata is retained outside Git
 under `/srv/memory-v4-phase13-evidence` and `/srv/memory-v4-phase14-evidence`.
