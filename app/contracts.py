@@ -90,6 +90,10 @@ class ErrorResponse(BaseModel):
 # operation never implies that the route exists yet.
 OPERATIONS = [
     CapabilityOperation(
+        method="POST", path="/applications/knowledge/scrub", permission=Permission.admin,
+        status=OperationStatus.implemented, mutation=True, reason_required=True,
+    ),
+    CapabilityOperation(
         method="GET", path="/capabilities", permission=Permission.read,
         status=OperationStatus.implemented,
     ),

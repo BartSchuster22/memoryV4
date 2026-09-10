@@ -1212,6 +1212,9 @@ def create_app() -> FastAPI:
             events=events,
         )
 
+    from app.application_lifecycle import register_application_lifecycle
+
+    register_application_lifecycle(app, get_store, require_auth)
     return app
 
 

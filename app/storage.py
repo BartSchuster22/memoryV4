@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -43,6 +43,9 @@ from app.schemas import (
     utc_now,
 )
 from app.sqlite_runtime import DatabaseLock, assert_integrity, connect_sqlite
+
+if TYPE_CHECKING:
+    from app.application_lifecycle import ApplicationScrubRequest
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -118,6 +121,9 @@ class SqliteStore:
             lease.close()
             raise
         self._lease = lease
+        from app.application_lifecycle import install_application_scrub_guard
+
+        install_application_scrub_guard(self)
 
     def close(self) -> None:
         if self._lease is not None:
@@ -1493,6 +1499,9 @@ class SqliteStore:
         """Persist a worker-produced review finding below the public API boundary."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            from app.application_lifecycle import guard_erased_references
+
+            guard_erased_references(conn, finding.model_dump(mode="json"))
             self._assert_review_subject_visible(conn, finding.subject, finding.scope_path)
             created = Finding(**finding.model_dump(), created_by_actor=actor)
             now = utc_now()
@@ -2058,14 +2067,34 @@ class SqliteStore:
         actor: str,
         result_count: int,
         degraded: bool,
+        application_binding: ApplicationScrubRequest | None = None,
     ) -> None:
+        from app.application_lifecycle import guard_erased_references
+
+        guard_erased_references(conn, {"query": query})
+        if application_binding is not None:
+            from app.application_lifecycle import ApplicationScrubRequest, guard_erased_binding
+
+            if not isinstance(application_binding, ApplicationScrubRequest):
+                raise ValueError("validated application binding required")
+            if application_binding.scope_path != scope_path or not actor.startswith("unify:"):
+                raise ValueError("application retrieval binding mismatch")
+            guard_erased_binding(conn, scope_path, {
+                "applicationId": application_binding.application_id,
+                "receiptId": application_binding.receipt_id,
+                "subject": application_binding.subject,
+            }, actor)
         conn.execute(
             """
             INSERT INTO retrieval_events(
-              query, scope_path, actor, result_count, degraded, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              query, scope_path, actor, result_count, degraded, created_at,
+              application_id, receipt_id, subject
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (query, scope_path, actor, result_count, int(degraded), utc_now()),
+            (query, scope_path, actor, result_count, int(degraded), utc_now(),
+             application_binding.application_id if application_binding else None,
+             application_binding.receipt_id if application_binding else None,
+             application_binding.subject if application_binding else None),
         )
 
     def count_audit_events(self, *, action: str | None = None) -> int:

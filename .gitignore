@@ -43,3 +43,5 @@ id_ed25519*
 dist/
 build/
 *.egg-info/
+
+/.application-scrub-test-support/

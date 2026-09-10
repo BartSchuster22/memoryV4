@@ -477,12 +477,23 @@ def _down_0005(conn: sqlite3.Connection) -> None:
     )
 
 
+def _up_0006(conn: sqlite3.Connection) -> None:
+    for column in ("application_id", "receipt_id", "subject"):
+        conn.execute(f"ALTER TABLE retrieval_events ADD COLUMN {column} TEXT")
+
+
+def _down_0006(conn: sqlite3.Connection) -> None:
+    for column in ("subject", "receipt_id", "application_id"):
+        conn.execute(f"ALTER TABLE retrieval_events DROP COLUMN {column}")
+
+
 MIGRATIONS = [
     Migration("0001_foundation", _up_0001, _down_0001),
     Migration("0002_governance", _up_0002, _down_0002),
     Migration("0003_core_objects", _up_0003, _down_0003),
     Migration("0004_record_lifecycle", _up_0004, _down_0004),
     Migration("0005_review_audit_operations", _up_0005, _down_0005),
+    Migration("0006_application_retrieval_binding", _up_0006, _down_0006),
 ]
 
 
